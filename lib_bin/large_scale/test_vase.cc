@@ -558,6 +558,10 @@ int main(int argc, char** argv) {
             << " s)\n\n";
 
   double shake_dx_prev = 0.0;
+  const char* phase_timing_env = std::getenv("TLFEA_PHASE_TIMING");
+  const bool phase_timing =
+      phase_timing_env != nullptr && phase_timing_env[0] != '\0' &&
+      phase_timing_env[0] != '0';
 
   for (int step = 0; step < max_steps; ++step) {
     const auto t0 = std::chrono::high_resolution_clock::now();
@@ -597,7 +601,10 @@ int main(int argc, char** argv) {
     // DemeMeshCollisionSystem currently takes its actual contact material from
     // construction-time parameters / env overrides, not from per-step params.
     CollisionSystemParams coll_params;
+    const auto t_coll0 = std::chrono::high_resolution_clock::now();
     collision_system->Step(coll_in, coll_params);
+    HANDLE_ERROR(cudaDeviceSynchronize());
+    const auto t_coll1 = std::chrono::high_resolution_clock::now();
     const int num_contacts = collision_system->GetNumContacts();
 
     double* d_f_ext = solver.GetExternalForceDevicePtr();
@@ -612,6 +619,19 @@ int main(int argc, char** argv) {
     }
 
     solver.Solve();
+    HANDLE_ERROR(cudaDeviceSynchronize());
+    if (phase_timing) {
+      const auto t_solve1 = std::chrono::high_resolution_clock::now();
+      std::cout << std::fixed << std::setprecision(3)
+                << "VASE_TIMING step=" << step << " contacts=" << num_contacts
+                << " coll_ms="
+                << std::chrono::duration<double, std::milli>(t_coll1 - t_coll0)
+                       .count()
+                << " solve_ms="
+                << std::chrono::duration<double, std::milli>(t_solve1 - t_coll1)
+                       .count()
+                << std::endl;
+    }
 
     if (exp_interval > 0 && step % exp_interval == 0) {
       std::ostringstream foam_fn;

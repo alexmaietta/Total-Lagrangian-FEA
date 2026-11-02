@@ -66,6 +66,9 @@ struct Options {
   bool write_csv = false;
   std::string csv_path;
   bool write_vtu = false;
+  // Newton override: sets inner atol, inner rtol and outer tol (NaN keeps the
+  // per-resolution defaults).
+  double newton_tol = std::numeric_limits<double>::quiet_NaN();
 };
 
 void PrintUsage(const char* argv0) {
@@ -243,6 +246,14 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
     if (arg == "--vtu") {
       opt.write_vtu = true;
+      continue;
+    }
+    if (StartsWith(arg, "--newton_tol=")) {
+      if (!ParseDouble(arg.substr(std::string("--newton_tol=").size()),
+                       opt.newton_tol)) {
+        std::cerr << "Invalid " << arg << "\n";
+        return false;
+      }
       continue;
     }
     std::cerr << "Unknown argument: " << arg << "\n";
@@ -454,6 +465,10 @@ int main(int argc, char** argv) {
                                    false};
       if (opt.res == 8 || opt.res == 16 || opt.res == 32) {
         params = {1e-3, 1e-3, 1e-3, 1e14, 5, 10, opt.dt, false};
+      }
+      if (!std::isnan(opt.newton_tol)) {
+        params.inner_atol = params.inner_rtol = params.outer_tol =
+            opt.newton_tol;
       }
       SyncedNewtonSolver solver(&data, data.get_n_constraint());
       solver.Setup();

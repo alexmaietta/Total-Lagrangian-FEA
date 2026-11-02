@@ -54,9 +54,9 @@ int main(int argc, char** argv) {
   double contact_mu_s = 0.3;
   double contact_mu_k = 0.3;
   double contact_cor  = 1.0;
-  const double contact_stiffness = 5e7;
+  double contact_stiffness = 5e7;
 
-  const double dt = 1e-4;
+  double dt = 1e-4;
   int max_steps = 2000;
   int export_interval = 10;
   std::string out_suffix;
@@ -80,6 +80,9 @@ int main(int argc, char** argv) {
     cli.AddDouble("cor", contact_cor, "contact restitution (CoR), range [0, 1]");
     cli.AddDouble("mu_s", contact_mu_s, "contact static friction mu_s");
     cli.AddDouble("mu_k", contact_mu_k, "contact kinetic friction mu_k");
+    cli.AddDouble("dt", dt, "time step (s)");
+    cli.AddDouble("contact_E", contact_stiffness,
+                  "contact Young's modulus passed to DEM-Engine (Pa)");
     cli.AddInt("steps", max_steps, "max simulation steps");
     cli.AddInt("export_interval", export_interval, "VTK export interval (0 disables)");
     cli.AddString("out_suffix", "", "suffix appended to output folder name");
@@ -102,6 +105,8 @@ int main(int argc, char** argv) {
     contact_cor = cli.GetDouble("cor");
     contact_mu_s = cli.GetDouble("mu_s");
     contact_mu_k = cli.GetDouble("mu_k");
+    dt = cli.GetDouble("dt");
+    contact_stiffness = cli.GetDouble("contact_E");
     max_steps = cli.GetInt("steps");
     export_interval = cli.GetInt("export_interval");
     out_suffix = cli.GetString("out_suffix");

@@ -82,6 +82,14 @@ struct Options {
   int res               = 8;  // 0/2/4/8/16/32
   bool write_csv        = false;
   std::string csv_path;
+  // Newton overrides (NaN / -1 keep the per-resolution defaults).
+  double newton_atol = std::numeric_limits<double>::quiet_NaN();
+  double newton_rtol = std::numeric_limits<double>::quiet_NaN();
+  double outer_tol   = std::numeric_limits<double>::quiet_NaN();
+  int max_inner      = -1;
+  int max_outer      = -1;
+  // Per-element von Mises (Cauchy) at the final step, with reference centroids.
+  std::string vm_out;
 };
 
 void PrintUsage(const char* argv0) {
@@ -98,7 +106,10 @@ void PrintUsage(const char* argv0) {
       << "  --omega=W          VBD relaxation factor (default: 1.8)\n"
       << "  --svk_mat          use the original SVK beam material (default)\n"
       << "  --mr_mat           use the derived Mooney-Rivlin beam material\n"
-      << "  --csv[=PATH]       write target-node x history CSV\n";
+      << "  --csv[=PATH]       write target-node x history CSV\n"
+      << "  --newton_atol=X --newton_rtol=X --outer_tol=X\n"
+      << "  --max_inner=N --max_outer=N   override Newton settings\n"
+      << "  --vm_out=PATH      write final per-element von Mises CSV\n";
 }
 
 bool StartsWith(const std::string& s, const std::string& prefix) {
@@ -238,6 +249,44 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     if (StartsWith(arg, "--csv=")) {
       opt.write_csv = true;
       opt.csv_path  = arg.substr(std::string("--csv=").size());
+      continue;
+    }
+    struct DoubleFlag {
+      const char* prefix;
+      double* dst;
+    };
+    const DoubleFlag dflags[] = {{"--newton_atol=", &opt.newton_atol},
+                                 {"--newton_rtol=", &opt.newton_rtol},
+                                 {"--outer_tol=", &opt.outer_tol}};
+    bool matched = false;
+    for (const auto& f : dflags) {
+      if (StartsWith(arg, f.prefix)) {
+        if (!ParseDouble(arg.substr(std::string(f.prefix).size()), *f.dst)) {
+          std::cerr << "Invalid " << arg << "\n";
+          return false;
+        }
+        matched = true;
+      }
+    }
+    if (StartsWith(arg, "--max_inner=")) {
+      if (!ParseInt(arg.substr(12), opt.max_inner)) {
+        std::cerr << "Invalid " << arg << "\n";
+        return false;
+      }
+      matched = true;
+    }
+    if (StartsWith(arg, "--max_outer=")) {
+      if (!ParseInt(arg.substr(12), opt.max_outer)) {
+        std::cerr << "Invalid " << arg << "\n";
+        return false;
+      }
+      matched = true;
+    }
+    if (StartsWith(arg, "--vm_out=")) {
+      opt.vm_out = arg.substr(std::string("--vm_out=").size());
+      matched    = true;
+    }
+    if (matched) {
       continue;
     }
     std::cerr << "Unknown argument: " << arg << "\n";
@@ -437,6 +486,21 @@ int main(int argc, char** argv) {
       if (opt.res == 32) {
         params = {1e-3, 1e-3, 1e-3, 1e14, 5, 10, opt.dt, false};
       }
+      if (!std::isnan(opt.newton_atol))
+        params.inner_atol = opt.newton_atol;
+      if (!std::isnan(opt.newton_rtol))
+        params.inner_rtol = opt.newton_rtol;
+      if (!std::isnan(opt.outer_tol))
+        params.outer_tol = opt.outer_tol;
+      if (opt.max_inner > 0)
+        params.max_inner = opt.max_inner;
+      if (opt.max_outer > 0)
+        params.max_outer = opt.max_outer;
+      std::cout << "Newton params: atol=" << params.inner_atol
+                << " rtol=" << params.inner_rtol
+                << " outer_tol=" << params.outer_tol << " rho=" << params.rho
+                << " max_outer=" << params.max_outer
+                << " max_inner=" << params.max_inner << std::endl;
       SyncedNewtonSolver solver(&data, data.get_n_constraint());
       solver.Setup();
       solver.SetParameters(&params);
@@ -506,6 +570,27 @@ int main(int argc, char** argv) {
 
   if (opt.write_csv) {
     csv_file.close();
+  }
+
+  if (!opt.vm_out.empty()) {
+    data.CalcP();
+    data.ComputeVonMises();
+    Eigen::VectorXd vm;
+    data.RetrieveVonMisesToCPU(vm);
+    std::ofstream vm_file(opt.vm_out);
+    vm_file << std::setprecision(17);
+    vm_file << "elem,cx,cy,cz,von_mises\n";
+    for (int e = 0; e < n_elems; ++e) {
+      double c[3] = {0.0, 0.0, 0.0};
+      for (int a = 0; a < 4; ++a) {
+        for (int d = 0; d < 3; ++d) {
+          c[d] += 0.25 * nodes(elements(e, a), d);
+        }
+      }
+      vm_file << e << "," << c[0] << "," << c[1] << "," << c[2] << ","
+              << vm(e) << "\n";
+    }
+    std::cout << "Wrote von Mises CSV: " << opt.vm_out << std::endl;
   }
 
   data.Destroy();

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <vector>
@@ -32,6 +33,23 @@
 #include "../elements/FEAT10Data.cuh"
 #include "../elements/FEAT10DataFunc.cuh"
 #include "SyncedNewton.cuh"
+
+namespace {
+// Revision instrumentation switches (all off by default).
+bool RevEnvFlag(const char *name) {
+  const char *v = std::getenv(name);
+  return v != nullptr && v[0] != '\0' && v[0] != '0';
+}
+int RevEnvIntOr(const char *name, int fallback) {
+  const char *v = std::getenv(name);
+  return (v != nullptr && v[0] != '\0') ? std::atoi(v) : fallback;
+}
+double RevNowMs() {
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
 
 namespace cg = cooperative_groups;
 template <typename ElementType>
@@ -662,6 +680,16 @@ void SyncedNewtonSolver::AnalyzeHessianSparsity() {
   if (sparse_hessian_initialized_)
     return;
 
+  const double rev_sparsity_t0 = RevNowMs();
+  struct RevSparsityTimer {
+    double t0;
+    ~RevSparsityTimer() {
+      cudaDeviceSynchronize();
+      std::cout << "SPARSITY_BUILD_MS=" << std::fixed << std::setprecision(3)
+                << (RevNowMs() - t0) << std::endl;
+    }
+  } rev_sparsity_timer{rev_sparsity_t0};
+
   std::cout << "Analyzing Hessian sparsity pattern..." << std::endl;
 
   // Special-case: T10/ANCF with general sparse constraints needs a
@@ -1264,6 +1292,26 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
   CUDSS_OK(cudssMatrixCreateDn(&dssX, n_dofs, 1, n_dofs, d_delta_v_, CUDSS_R_64F,
                                CUDSS_LAYOUT_COL_MAJOR));
 
+  const bool rev_timing        = RevEnvFlag("TLFEA_PHASE_TIMING");
+  const bool rev_reanalyze     = RevEnvFlag("TLFEA_FORCE_REANALYSIS");
+  const int rev_fixed_override = RevEnvIntOr("TLFEA_FIXED_SPARSITY", -1);
+  if (rev_fixed_override >= 0) {
+    fixed_sparsity_pattern_ = (rev_fixed_override != 0);
+  }
+  struct {
+    double p = 0, fint = 0, con = 0, grad = 0, hess = 0, analysis = 0,
+           factor = 0, refactor = 0, solve = 0, ls = 0;
+    int newton = 0, n_factor = 0, n_refactor = 0, n_analysis = 0, outer = 0,
+        ls_fail = 0;
+  } rev_pt;
+  bool rev_in_line_search = false;
+  auto rev_sync_now       = [&]() {
+    if (rev_timing)
+      HANDLE_ERROR(cudaDeviceSynchronize());
+    return RevNowMs();
+  };
+  const double rev_step_t0 = RevNowMs();
+
   HANDLE_ERROR(cudaEventRecord(start));
 
   // Analysis (symbolic) depends on the matrix structure (CSR pattern), not on
@@ -1320,8 +1368,10 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
   };
 
   auto evaluate_state = [&](auto *typed_data) {
+    const double rev_t0 = rev_sync_now();
     cudss_solve_compute_p<<<numBlocks_compute_p, threadsPerBlock>>>(
         typed_data, d_newton_solver_);
+    const double rev_t1 = rev_sync_now();
 
     cudss_solve_clear_internal_force<<<numBlocks_clear_internal_force,
                                        threadsPerBlock>>>(typed_data);
@@ -1329,6 +1379,7 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
     cudss_solve_compute_internal_force<<<numBlocks_internal_force,
                                          threadsPerBlock>>>(typed_data,
                                                             d_newton_solver_);
+    const double rev_t2 = rev_sync_now();
 
     if (n_constraints_eval > 0) {
       cudss_solve_constraints_eval<<<numBlocks_constraints_eval,
@@ -1344,11 +1395,19 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
       }
     }
 
+    const double rev_t3 = rev_sync_now();
     cudss_solve_compute_grad_l<<<numBlocks_grad_l, threadsPerBlock>>>(
         typed_data, d_newton_solver_);
 
     HANDLE_ERROR(cudaDeviceSynchronize());
-    return compute_l2_norm_cublas(d_g_, n_dofs);
+    const double norm = compute_l2_norm_cublas(d_g_, n_dofs);
+    if (rev_timing && !rev_in_line_search) {
+      rev_pt.p += rev_t1 - rev_t0;
+      rev_pt.fint += rev_t2 - rev_t1;
+      rev_pt.con += rev_t3 - rev_t2;
+      rev_pt.grad += RevNowMs() - rev_t3;
+    }
+    return norm;
   };
 
   auto armijo_line_search = [&](auto *typed_data, double norm_g) {
@@ -1417,6 +1476,7 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
 
     for (int outer_iter = 0; outer_iter < h_max_outer_; ++outer_iter) {
       std::cout << "Outer iter " << outer_iter << std::endl;
+      rev_pt.outer++;
 
       double norm_g0          = -1.0;
       double last_norm_g      = std::numeric_limits<double>::infinity();
@@ -1440,6 +1500,7 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
           break;
         }
 
+        const double rev_th0 = rev_sync_now();
         cudss_solve_initialize_prehess<<<numBlocks_initialize_prehess,
                                          threadsPerBlock>>>(typed_data,
                                                             d_newton_solver_);
@@ -1473,21 +1534,50 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
         }
 
         HANDLE_ERROR(cudaDeviceSynchronize());
+        if (rev_timing)
+          rev_pt.hess += RevNowMs() - rev_th0;
+
+        if (rev_reanalyze) {
+          const double rev_ta = rev_sync_now();
+          CUDSS_OK(cudssExecute(cudss_handle_, CUDSS_PHASE_ANALYSIS,
+                                cudss_config_, cudss_data_, dssA, dssX, dssB));
+          factorization_done_ = false;
+          rev_pt.analysis += rev_sync_now() - rev_ta;
+          rev_pt.n_analysis++;
+        }
 
         cudssPhase_t factor_phase =
             (fixed_sparsity_pattern_ && factorization_done_)
                 ? CUDSS_PHASE_REFACTORIZATION
                 : CUDSS_PHASE_FACTORIZATION;
+        const double rev_tf0 = rev_sync_now();
         CUDSS_OK(cudssExecute(cudss_handle_, factor_phase, cudss_config_,
                               cudss_data_, dssA, dssX, dssB));
+        const double rev_tf1 = rev_sync_now();
+        if (factor_phase == CUDSS_PHASE_REFACTORIZATION) {
+          rev_pt.refactor += rev_tf1 - rev_tf0;
+          rev_pt.n_refactor++;
+        } else {
+          rev_pt.factor += rev_tf1 - rev_tf0;
+          rev_pt.n_factor++;
+        }
         factorization_done_ = true;
 
         HANDLE_ERROR(cudaMemset(d_delta_v_, 0, n_dofs * sizeof(double)));
+        const double rev_ts0 = rev_sync_now();
         CUDSS_OK(cudssExecute(cudss_handle_, CUDSS_PHASE_SOLVE, cudss_config_,
                               cudss_data_, dssA, dssX, dssB));
+        rev_pt.solve += rev_sync_now() - rev_ts0;
+        rev_pt.newton++;
 
         if (h_enable_line_search_) {
-          if (!armijo_line_search(typed_data, norm_g)) {
+          const double rev_tl0 = rev_sync_now();
+          rev_in_line_search  = true;
+          const bool ls_ok    = armijo_line_search(typed_data, norm_g);
+          rev_in_line_search  = false;
+          rev_pt.ls += rev_sync_now() - rev_tl0;
+          if (!ls_ok) {
+            rev_pt.ls_fail++;
             line_search_failed = true;
             break;
           }
@@ -1581,6 +1671,21 @@ void SyncedNewtonSolver::OneStepNewtonCuDSS() {
 
   std::cout << "OneStepNewtonCuDSS kernel time: " << milliseconds << " ms"
             << std::endl;
+  if (rev_timing) {
+    std::cout << std::fixed << std::setprecision(3)
+              << "PHASE_TIMING n_dofs=" << n_dofs << " newton=" << rev_pt.newton
+              << " outer=" << rev_pt.outer << " p_ms=" << rev_pt.p
+              << " fint_ms=" << rev_pt.fint << " con_ms=" << rev_pt.con
+              << " grad_ms=" << rev_pt.grad << " hess_ms=" << rev_pt.hess
+              << " analysis_ms=" << rev_pt.analysis
+              << " n_analysis=" << rev_pt.n_analysis
+              << " factor_ms=" << rev_pt.factor << " n_factor=" << rev_pt.n_factor
+              << " refactor_ms=" << rev_pt.refactor
+              << " n_refactor=" << rev_pt.n_refactor
+              << " solve_ms=" << rev_pt.solve << " ls_ms=" << rev_pt.ls
+              << " ls_fail=" << rev_pt.ls_fail
+              << " step_ms=" << (RevNowMs() - rev_step_t0) << std::endl;
+  }
 
   HANDLE_ERROR(cudaEventDestroy(start));
   HANDLE_ERROR(cudaEventDestroy(stop));
