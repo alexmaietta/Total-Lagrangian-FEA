@@ -115,8 +115,10 @@ def batch_vase(args):
 
 
 def batch_reference(args):
+    # The tolerances can sit below the round-off floor of ||g||; the caps bound the
+    # cost (the inner loop is at round-off after a few quadratic steps).
     tight = ["--newton_atol=1e-11", "--newton_rtol=1e-12", "--outer_tol=1e-11",
-             "--max_inner=30", "--max_outer=10"]
+             "--max_inner=8", "--max_outer=3"]
     for res in RES:
         for mat in ["svk", "mr"]:
             matflag = "--mr_mat" if mat == "mr" else "--svk_mat"
