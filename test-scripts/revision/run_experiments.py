@@ -11,10 +11,13 @@ Batches
   reference  tight-tolerance Newton reference for T10, plus a von Mises dump
   tolerance  Newton at 1e-4 where the paper relaxed to 1e-3
   impact     time step x contact modulus sweep for the oblique impact test
+  fenics     FEniCS T10 references (CPU, MPI; needs a DOLFINx 0.10 env, no GPU build)
 
 Run from the repository root after building with --config=sm120, e.g.
   python3 test-scripts/revision/run_experiments.py scaling --out /path/to/runs \
       --guard /path/to/guard.py
+  python3 test-scripts/revision/run_experiments.py fenics --out /path/to/runs \
+      --fenics-python "$(which python)" --np 8
 """
 import argparse
 import math
@@ -83,7 +86,7 @@ def batch_scaling(args):
                 [A3243, f"--solver={solver}", f"--res={res}", "--steps=200",
                  "--dt=1e-3", "--csv={RUN}/tip.csv"], timing=True)
             run(args, f"a3443_{solver}_res{res}",
-                [A3443, f"--solver={solver}", f"--res={res}", "--steps=200",
+                [A3443, f"--solver={solver}", f"--res={res}",
                  "--dt=5e-4", "--csv={RUN}/tip.csv"], timing=True)
 
 
@@ -97,7 +100,7 @@ def batch_breakdown(args):
         run(args, f"t10_res{res}_reanalysis", base,
             {**t, "TLFEA_FIXED_SPARSITY": "0", "TLFEA_FORCE_REANALYSIS": "1"}, True)
     for res in [8, 16]:
-        base = [A3443, "--solver=newton", f"--res={res}", "--steps=200", "--dt=5e-4"]
+        base = [A3443, "--solver=newton", f"--res={res}", "--dt=5e-4"]
         run(args, f"a3443_res{res}_factor", base, {**t, "TLFEA_FIXED_SPARSITY": "0"}, True)
         run(args, f"a3443_res{res}_refactor", base, {**t, "TLFEA_FIXED_SPARSITY": "1"}, True)
         base = [A3243, "--solver=newton", f"--res={res}", "--steps=200", "--dt=1e-3"]
@@ -134,7 +137,7 @@ def batch_tolerance(args):
          "--csv={RUN}/tip.csv", "--newton_tol=1e-4"])
     for res in [8, 16, 32]:
         run(args, f"a3443_tol1e-4_res{res}",
-            [A3443, "--solver=newton", f"--res={res}", "--steps=200", "--dt=5e-4",
+            [A3443, "--solver=newton", f"--res={res}", "--dt=5e-4",
              "--csv={RUN}/tip.csv", "--newton_tol=1e-4"])
 
 
@@ -154,10 +157,33 @@ def batch_impact(args):
                 collect=[os.path.join("output", f"oblique_impact_{name}")])
 
 
+def batch_fenics(args):
+    py = args.fenics_python
+    mpirun = os.path.join(os.path.dirname(py), "mpirun")
+    script = os.path.join(REPO, "test-scripts", "revision", "fenics_beam_vm.py")
+    # "keast": inertia term integrated with the GPU's 5-point rule (same discrete
+    # problem as the GPU code); default: degree-5 rule for all terms.
+    for variant in ["keast", "default"]:
+        for mat in ["svk", "mr"]:
+            for res in RES:
+                if variant == "keast" and res > 16:
+                    continue
+                extra = [] if (res == 8 and mat == "svk") else ["--no-vm"]
+                if variant == "keast":
+                    extra.append("--keast-mass")
+                tag = "_keast" if variant == "keast" else ""
+                run(args, f"t10_{mat}{tag}_res{res}",
+                    [mpirun, "-np", str(args.np), py, script, "--res", str(res),
+                     "--out", "{RUN}", "--snes-tol", "1e-8"]
+                    + (["--mr"] if mat == "mr" else []) + extra)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("batch", choices=["scaling", "breakdown", "vase", "reference",
-                                      "tolerance", "impact"])
+                                      "tolerance", "impact", "fenics"])
+    ap.add_argument("--fenics-python", default=None, help="python of a DOLFINx 0.10 env")
+    ap.add_argument("--np", type=int, default=8)
     ap.add_argument("--out", required=True)
     ap.add_argument("--guard", default=None, help="optional path to a guard wrapper")
     ap.add_argument("--guard-args", default="")

@@ -36,6 +36,8 @@ if rank == 0:
 parser = argparse.ArgumentParser()
 parser.add_argument("--res", type=int, default=0)
 parser.add_argument("--mr", action="store_true", help="Use Mooney-Rivlin material")
+parser.add_argument("--keast-mass", action="store_true",
+                    help="Integrate the inertia term with the 5-point Keast rule of the GPU T10 element")
 args = parser.parse_args()
 RES = args.res
 
@@ -397,7 +399,17 @@ a_current = (v_current - v_old) / dt
 # Backward Euler variational form:
 # REMOVED: - ufl.inner(v, f_nodal) * dx
 # We now only calculate Mass (Inertia) and Stiffness (Internal Stress) here.
-F_form = (rho * ufl.inner(a_current, v) * dx +
+dx_mass = dx
+if args.keast_mass:
+    keast_points = np.array([[0.25, 0.25, 0.25], [1 / 6, 1 / 6, 1 / 6], [0.5, 1 / 6, 1 / 6],
+                             [1 / 6, 0.5, 1 / 6], [1 / 6, 1 / 6, 0.5]])
+    keast_weights = np.array([-0.8, 0.45, 0.45, 0.45, 0.45]) / 6.0
+    dx_mass = ufl.Measure("dx", domain=domain,
+                          metadata={"quadrature_rule": "custom",
+                                    "quadrature_points": keast_points,
+                                    "quadrature_weights": keast_weights})
+
+F_form = (rho * ufl.inner(a_current, v) * dx_mass +
           ufl.inner(ufl.grad(v), P) * dx -
           ufl.inner(v, B) * dx)
 
@@ -427,6 +439,7 @@ class PointLoadProblem(NonlinearProblem):
 
 # Initialize the custom problem
 snes_tol = 1e-3 if RES == 32 else 1e-4
+snes_tol = float(os.environ.get("FENICS_SNES_TOL", snes_tol))
 
 problem = PointLoadProblem(
     F_form,
