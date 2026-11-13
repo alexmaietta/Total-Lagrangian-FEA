@@ -1,0 +1,53 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cuda//cuda:defs.bzl", "cuda_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cuda_library(
+    name = "live_viewer_kernels",
+    srcs = ["LiveViewerKernels.cu"],
+    hdrs = ["LiveViewerKernels.cuh"],
+    copts = ["--std=c++17", "-O3"],
+    linkopts = ["-lcudart"],
+)
+
+# Live view of simulations through Chrono Batch Render (see LiveViewer.h).
+cc_library(
+    name = "live_viewer",
+    srcs = ["LiveViewer.cc"],
+    hdrs = ["LiveViewer.h"],
+    copts = ["--std=c++17"],
+    deps = [
+        ":live_viewer_kernels",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cuda_utils",
+        "//lib_utils:mesh_manager",
+        "//lib_utils:surface_trimesh",
+        "//lib_utils:surface_trimesh_extract",
+        "//third_party:chrono_batch_render_viewer",
+        "@eigen//:eigen",
+        "@rules_cuda//cuda:runtime",
+    ],
+)
+
+# Surfaces of ANCF beams and shells for the live viewer.
+cc_library(
+    name = "ancf_surfaces",
+    srcs = ["ANCFSurfaces.cc"],
+    hdrs = ["ANCFSurfaces.h"],
+    copts = ["--std=c++17"],
+    deps = [
+        ":live_viewer",
+        "//lib_utils:cpu_utils",
+        "@eigen//:eigen",
+    ],
+)
+
+# ASCII VTK reader for playing back .vtu, .vtp and legacy .vtk output.
+cc_library(
+    name = "vtk_reader",
+    srcs = ["VtkReader.cc"],
+    hdrs = ["VtkReader.h"],
+    copts = ["--std=c++17"],
+    deps = ["@eigen//:eigen"],
+)
