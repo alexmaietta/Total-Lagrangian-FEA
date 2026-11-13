@@ -72,6 +72,7 @@ struct Options {
   bool write_vtu = false;
   bool offscreen = false;
   bool ground    = false;  // The beam flexes through the ground plane
+  bool viewer_ui = false;
   std::string screenshot;
 };
 
@@ -98,6 +99,8 @@ void PrintUsage(const char* argv0) {
          "on solver)\n"
       << "  --offscreen       render without a window\n"
       << "  --ground[=BOOL]   show the ground plane (default: false)\n"
+      << "  --viewer_ui       show the viewer's menus, toolbar, HUD, axes and "
+         "panels\n"
       << "  --screenshot=PNG  write the last frame to a PNG file (implies "
          "--offscreen)\n"
       << "  --vtu             write VTU beam hex meshes to output/ancf3243/ "
@@ -284,6 +287,10 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
     if (arg == "--ground=false") {
       opt.ground = false;
+      continue;
+    }
+    if (arg == "--viewer_ui") {
+      opt.viewer_ui = true;
       continue;
     }
     if (arg == "--offscreen") {
@@ -519,7 +526,8 @@ int main(int argc, char** argv) {
   view_options.title       = "ANCF3243 beam (" + SolverName(opt.solver) + ")";
   view_options.offscreen   = opt.offscreen;
   view_options.show_ground = opt.ground;
-  view_options.screenshot  = opt.screenshot;
+  view_options.show_viewer_ui = opt.viewer_ui;
+  view_options.screenshot     = opt.screenshot;
   LiveView::LiveViewer viewer(view_options);
   viewer.AddSurface("Beam",
                     LiveView::ANCF3243Surface(h_x12, h_y12, h_z12,

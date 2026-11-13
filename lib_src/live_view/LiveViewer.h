@@ -23,6 +23,11 @@ struct LiveViewerOptions {
   unsigned height   = 720;
   bool offscreen    = false;  // Render without a window (headless runs)
   bool show_ground  = true;   // A checkered ground under the surfaces
+  // The viewer's own UI: its menus, toolbar, HUD, axis indicator and panels
+  // (Stage, Properties, Info, Log, Profiler, Memory, Capture). Off leaves the
+  // view with the colorbar, the status line and the timeline, whose settings
+  // can turn it back on.
+  bool show_viewer_ui = false;
   // Field the surfaces are colored by (displacement, or the node scalar given
   // to AddSurface), and the value at the top of the colormap. Zero picks a
   // tenth of the size of the surfaces at rest, for displacement.
@@ -55,7 +60,7 @@ struct LinearSurface {
 
 /**
  * Add the options every live demo takes (--offscreen, --screenshot,
- * --ground).
+ * --ground, --viewer_ui).
  * @param cli Command line to add them to
  * @param show_ground Whether the ground shows unless --ground says otherwise
  */

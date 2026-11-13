@@ -535,6 +535,18 @@ void LiveViewer::Impl::Open() {
   viewport.footer   = [this] { DrawTimeline(); };
   viewer_->AddViewport(std::move(viewport));
 
+  // Just the view and its timeline unless the viewer's UI is asked for. Its
+  // panels stay hidden either way, a click away in the Window menu.
+  for (const char* panel : {"Stage", "Properties", "Info", "Log", "Profiler",
+                            "Memory", "Capture"}) {
+    try {
+      viewer_->ShowPanel(panel, false);
+    } catch (const cbr::Error&) {
+      // Not in this build of the viewer
+    }
+  }
+  viewer_->ShowBaseGui(options_.show_viewer_ui);
+
   viewer_->AddKeyHandler(
       [this](const cbr::app::KeyEvent& event) { return OnKey(event); });
 
@@ -1046,6 +1058,12 @@ void LiveViewer::Impl::DrawTimelineSettings() {
   }
   ImGui::Separator();
   section("View");
+  if (ImGui::MenuItem("Show Viewer UI", nullptr, options_.show_viewer_ui)) {
+    options_.show_viewer_ui = !options_.show_viewer_ui;
+    viewer_->ShowBaseGui(options_.show_viewer_ui);
+  }
+  ImGui::SetItemTooltip(
+      "The viewer's menus, toolbar, HUD, axis indicator and panels");
   if (ImGui::MenuItem("Show Ground", nullptr, options_.show_ground)) {
     options_.show_ground = !options_.show_ground;
     cbr::PlanePrim(*scene_->Find("/Ground"))
@@ -1165,6 +1183,8 @@ void AddViewerOptions(ANCFCPUUtils::Cli& cli, bool show_ground) {
   cli.AddBool("offscreen", false, "render without a window");
   cli.AddBool("ground", show_ground,
               "show the ground plane (--ground=false hides it)");
+  cli.AddBool("viewer_ui", false,
+              "show the viewer's menus, toolbar, HUD, axes and panels");
   cli.AddString("screenshot", "",
                 "write the last frame to this PNG file (implies --offscreen)");
 }
@@ -1176,6 +1196,7 @@ LiveViewerOptions ViewerOptions(const ANCFCPUUtils::Cli& cli,
   options.screenshot  = cli.GetString("screenshot");
   options.offscreen   = cli.GetBool("offscreen") || !options.screenshot.empty();
   options.show_ground = cli.GetBool("ground");
+  options.show_viewer_ui = cli.GetBool("viewer_ui");
   return options;
 }
 
