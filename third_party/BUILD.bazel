@@ -6,3 +6,13 @@ alias(
     actual = "@dem_engine//:dem_engine",
 )
 
+
+alias(
+    name = "chrono_batch_render",
+    actual = "@chrono_batch_render//:chrono_batch_render",
+)
+
+alias(
+    name = "chrono_batch_render_viewer",
+    actual = "@chrono_batch_render//:viewer",
+)

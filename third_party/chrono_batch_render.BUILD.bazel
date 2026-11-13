@@ -1,0 +1,45 @@
+load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_import(
+    name = "slang_compiler",
+    shared_library = "lib/chrono_batch_render/libslang-compiler.so.0.2026.20",
+)
+
+cc_import(
+    name = "renderer_lib",
+    shared_library = "lib/libchrono_batch_render.so.0",
+)
+
+cc_import(
+    name = "viewer_lib",
+    shared_library = "lib/libchrono_batch_render_viewer.so.0",
+)
+
+cc_library(
+    name = "chrono_batch_render",
+    hdrs = glob(
+        ["include/**/*.h"],
+        exclude = ["include/chrono_batch_render/third_party/imgui/**"],
+    ),
+    data = ["lib/chrono_batch_render/libslang-glslang-2026.20.so"],
+    includes = [
+        "include",
+        "include/chrono_batch_render/third_party/dlpack",
+    ],
+    deps = [
+        ":renderer_lib",
+        ":slang_compiler",
+    ],
+)
+
+cc_library(
+    name = "viewer",
+    hdrs = glob(["include/chrono_batch_render/third_party/imgui/**/*.h"]),
+    includes = ["include/chrono_batch_render/third_party/imgui"],
+    deps = [
+        ":chrono_batch_render",
+        ":viewer_lib",
+    ],
+)

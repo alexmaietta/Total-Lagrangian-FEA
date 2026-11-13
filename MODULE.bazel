@@ -43,5 +43,16 @@ new_local_repository(
     path = "third_party/DEM-Engine",
 )
 
+# Chrono Batch Render prebuilt C++ release, used by the live viewer demos.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "chrono_batch_render",
+    build_file = "//third_party:chrono_batch_render.BUILD.bazel",
+    sha256 = "57c223e49cb8573ddac84fde0be168737046f21230972fd54e69d823026003de",
+    strip_prefix = "chrono-batch-render-0.1.0-Linux-x86_64",
+    url = "https://github.com/uwsbel/chrono-batch-render/releases/download/v0.1.0/chrono-batch-render-0.1.0-Linux-x86_64.tar.gz",
+)
+
 # Register CUDA toolchains provided by rules_cuda
 register_toolchains("@rules_cuda//cuda:all")
