@@ -1,0 +1,263 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "test_batch_render_interop",
+    srcs = ["test_batch_render_interop.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcudart",
+    ],
+    deps = [
+        "//third_party:chrono_batch_render_viewer",
+        "@rules_cuda//cuda:runtime",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_bunny_newton_live",
+    srcs = ["test_feat10_bunny_newton_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_teapot_newton_live",
+    srcs = ["test_feat10_teapot_newton_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_teapot_adamw_live",
+    srcs = ["test_feat10_teapot_adamw_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncedadamwnocoop",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_tire_newton_live",
+    srcs = ["test_feat10_tire_newton_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_double_pendulum_revolute_live",
+    srcs = ["test_feat10_double_pendulum_revolute_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "//lib_utils:mesh_manager",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_double_pendulum_spherical_live",
+    srcs = ["test_feat10_double_pendulum_spherical_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "//lib_utils:mesh_manager",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_feat10_piston_pump_cylindrical_live",
+    srcs = ["test_feat10_piston_pump_cylindrical_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+        "-lcublas",
+    ],
+    data = [
+        "//:data_meshes",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/elements:FEAT10Data",
+        "//lib_src/solvers:FEAT10ConstraintManager",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cpu_utils",
+        "//lib_utils:mesh_manager",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_vtk_playback",
+    srcs = ["test_vtk_playback.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcudart",
+    ],
+    deps = [
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/live_view:vtk_reader",
+        "//lib_utils:cli_utils",
+        "//lib_utils:cuda_utils",
+        "@rules_cuda//cuda:runtime",
+    ],
+)
+
+cc_binary(
+    name = "test_ancf3243_live",
+    srcs = ["test_ancf3243_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcublas",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+    ],
+    deps = [
+        "//lib_src/elements:ANCF3243Data",
+        "//lib_src/live_view:ancf_surfaces",
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/solvers:solvers_syncedadamwnocoop",
+        "//lib_src/solvers:solvers_syncednesterov",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_src/solvers:solvers_syncedvbd",
+        "//lib_utils:cpu_utils",
+        "//lib_utils:mesh_utils",
+        "//lib_utils:visualization_utils",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_binary(
+    name = "test_ancf3443_live",
+    srcs = ["test_ancf3443_live.cc"],
+    copts = ["--std=c++17"],
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lcublas",
+        "-lcusparse",
+        "-lcudart",
+        "-lcudss",
+    ],
+    deps = [
+        "//lib_src/elements:ANCF3443Data",
+        "//lib_src/live_view:ancf_surfaces",
+        "//lib_src/live_view:live_viewer",
+        "//lib_src/solvers:solvers_syncedadamwnocoop",
+        "//lib_src/solvers:solvers_syncednesterov",
+        "//lib_src/solvers:solvers_syncednewton",
+        "//lib_src/solvers:solvers_syncedvbd",
+        "//lib_utils:cpu_utils",
+        "//lib_utils:visualization_utils",
+        "@eigen//:eigen",
+    ],
+)
