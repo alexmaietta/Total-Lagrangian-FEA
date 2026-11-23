@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <deque>
 #include <exception>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -229,6 +230,110 @@ class FrameHistory {
   cudaEvent_t read_done_ = nullptr;
 };
 
+// The path in single quotes for the shell
+std::string ShellQuote(const std::string& path) {
+  std::string quoted = "'";
+  for (const char c : path) {
+    quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+  }
+  return quoted + "'";
+}
+
+/**
+ * Writes RGBA frames to an H.264 video, through an ffmpeg process reading
+ * them from a pipe, and/or to numbered PNG files.
+ */
+class FrameWriter {
+ public:
+  FrameWriter(const std::string& video, const std::string& png_dir,
+              unsigned width, unsigned height, double fps)
+      : width_(width), height_(height), png_dir_(png_dir), video_(video) {
+    if (!png_dir_.empty()) {
+      std::filesystem::create_directories(png_dir_);
+    }
+    if (!video_.empty()) {
+      if (const std::filesystem::path dir =
+              std::filesystem::path(video_).parent_path();
+          !dir.empty()) {
+        std::filesystem::create_directories(dir);
+      }
+      // yuv420p plays everywhere, and needs even dimensions
+      char size[64];
+      std::snprintf(size, sizeof(size), "%ux%u -framerate %g", width, height,
+                    fps);
+      const std::string command =
+          "ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s " +
+          std::string(size) +
+          " -i - -vf 'pad=ceil(iw/2)*2:ceil(ih/2)*2' -c:v libx264 -crf 18 "
+          "-preset medium -pix_fmt yuv420p -movflags +faststart " +
+          ShellQuote(video_);
+      ffmpeg_ = popen(command.c_str(), "w");
+      if (ffmpeg_ == nullptr) {
+        throw std::runtime_error("LiveViewer couldn't start ffmpeg for " +
+                                 video_);
+      }
+    }
+  }
+
+  ~FrameWriter() {
+    try {
+      Close();
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "%s\n", e.what());
+    }
+  }
+
+  void Write(const std::vector<uint8_t>& rgba) {
+    if (rgba.size() != size_t(width_) * height_ * 4) {
+      throw std::runtime_error("LiveViewer read " +
+                               std::to_string(rgba.size()) +
+                               " pixel bytes to save, expected " +
+                               std::to_string(size_t(width_) * height_ * 4) +
+                               " (was the window resized?)");
+    }
+    if (!png_dir_.empty()) {
+      char name[32];
+      std::snprintf(name, sizeof(name), "frame_%06d.png", frames_);
+      cbr::WritePng(std::filesystem::path(png_dir_) / name,
+                    cbr::Pixels(rgba, height_, width_, 4));
+    }
+    if (ffmpeg_ != nullptr &&
+        std::fwrite(rgba.data(), 1, rgba.size(), ffmpeg_) != rgba.size()) {
+      throw std::runtime_error("LiveViewer couldn't write to ffmpeg for " +
+                               video_);
+    }
+    ++frames_;
+  }
+
+  int Frames() const {
+    return frames_;
+  }
+
+  // Finish the video
+  void Close() {
+    if (ffmpeg_ == nullptr) {
+      return;
+    }
+    const int status = pclose(ffmpeg_);
+    ffmpeg_          = nullptr;
+    if (status != 0) {
+      throw std::runtime_error("ffmpeg failed writing " + video_ +
+                               " (is ffmpeg installed, with libx264?)");
+    }
+  }
+
+ private:
+  unsigned width_, height_;
+  std::string png_dir_;
+  std::string video_;
+  FILE* ffmpeg_ = nullptr;
+  int frames_   = 0;
+};
+
+// Draws before a published frame is on screen to read back (rendering lags a
+// few draws behind publishing)
+constexpr int kSettleDraws = 4;
+
 }  // namespace
 
 class LiveViewer::Impl {
@@ -330,6 +435,13 @@ class LiveViewer::Impl {
     shown_ = -1;  // Recolor the frame on screen
   }
   bool Publish(int frame);
+  void Capture();
+  bool Capturing() const {
+    return capturing_;
+  }
+  // Producing thread. Wait while a frame being saved is this many frames
+  // behind the next to be recorded, so none is dropped before it is saved.
+  void WaitForCapture(int recorded);
   void Drive(std::thread& producer);
   void UpdateTimeline();
   void DrawTimeline();
@@ -380,9 +492,16 @@ class LiveViewer::Impl {
   std::unique_ptr<cbr::app::Viewer> viewer_;
   std::vector<Surface> surfaces_;
   std::vector<FieldState> fields_;
-  size_t frame_bytes_       = 0;
-  float* d_values_          = nullptr;  // Colorize input
-  float* d_ranges_          = nullptr;  // [min, max] per field
+  size_t frame_bytes_ = 0;
+  float* d_values_    = nullptr;  // Colorize input
+  float* d_ranges_    = nullptr;  // [min, max] per field
+  // Saving frames
+  std::unique_ptr<FrameWriter> writer_;
+  int next_capture_  = 0;  // Under mutex_
+  int last_captured_ = -1;
+  int settle_        = -1;  // Draws until read back
+  int max_ahead_     = 2;   // Frames the run may record past next_capture_
+  std::atomic<bool> capturing_{false};
   cudaStream_t copy_stream_ = nullptr;
   cudaEvent_t publish_done_ = nullptr;
   // Rest bounding box
@@ -579,8 +698,15 @@ void LiveViewer::Impl::Open() {
   sky.color     = {0.75f, 0.85f, 1.0f};
   scene_->Define<cbr::DomeLight>("/Sky", sky);
 
-  const cbr::Double3 eye = {center.x + 1.6 * size, center.y - 2.0 * size,
-                            center.z + 0.9 * size};
+  const double azimuth   = options_.camera_azimuth * M_PI / 180.0;
+  const double elevation = options_.camera_elevation * M_PI / 180.0;
+  const double distance =
+      (options_.camera_distance > 0.0 ? options_.camera_distance : 2.715) *
+      size;
+  const cbr::Double3 eye = {
+      center.x + distance * std::cos(elevation) * std::cos(azimuth),
+      center.y + distance * std::cos(elevation) * std::sin(azimuth),
+      center.z + distance * std::sin(elevation)};
   cbr::Camera::Desc camera;
   camera.translate   = eye;
   camera.orient      = cbr::LookAt(eye, center);
@@ -662,6 +788,19 @@ void LiveViewer::Impl::Open() {
   HANDLE_ERROR(cudaMemcpy(d_ranges_, ranges.data(),
                           ranges.size() * sizeof(float),
                           cudaMemcpyHostToDevice));
+
+  if (!options_.video.empty() || !options_.png_dir.empty()) {
+    options_.capture_every = std::max(options_.capture_every, 1);
+    writer_ = std::make_unique<FrameWriter>(options_.video, options_.png_dir,
+                                            options_.width, options_.height,
+                                            options_.video_fps);
+    // Half of what the history holds, so saving never falls behind it
+    const size_t budget =
+        (options_.history_device_mb + options_.history_host_mb) << 20;
+    max_ahead_ = int(std::clamp<size_t>(budget / frame_bytes_ / 2, 2,
+                                        std::numeric_limits<int>::max()));
+    capturing_ = true;
+  }
 }
 
 // The colormap's bottom and top for a field: its own range, or else one that
@@ -868,6 +1007,73 @@ bool LiveViewer::Impl::Publish(int frame) {
   return true;
 }
 
+// Drawing thread. Show the next frame to save, and save it once drawn.
+void LiveViewer::Impl::Capture() {
+  int next = 0, end = 0;
+  bool done = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    done = recording_done_;  // Before End, so End is final once done
+    end  = history_.End();
+    if (next_capture_ < history_.First()) {
+      std::printf("live view: frames %d to %d were dropped before saving\n",
+                  next_capture_, history_.First() - 1);
+      next_capture_ = history_.First();
+    }
+    // The last frame is saved even off the stride
+    if (done && next_capture_ >= end && last_captured_ < end - 1) {
+      next_capture_ = end - 1;
+    }
+    next = next_capture_;
+  }
+  follow_  = false;
+  playing_ = false;
+  if (done && last_captured_ == end - 1) {
+    writer_->Close();
+    std::printf("live view: saved %d frames%s%s%s%s\n", writer_->Frames(),
+                options_.video.empty() ? "" : " to ", options_.video.c_str(),
+                options_.png_dir.empty() ? "" : " and to ",
+                options_.png_dir.c_str());
+    writer_.reset();
+    capturing_ = false;
+    changed_.notify_all();
+    return;
+  }
+  if (next >= end) {
+    return;  // Not recorded yet
+  }
+  cursor_ = next;
+  if (settle_ < 0 || shown_ != next) {
+    settle_ = -1;
+    if (Publish(next)) {
+      shown_  = next;
+      settle_ = kSettleDraws;
+    }
+    return;
+  }
+  if (--settle_ > 0) {
+    return;
+  }
+  writer_->Write(viewer_->ReadPixels());
+  last_captured_ = next;
+  settle_        = -1;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    next_capture_ = next + options_.capture_every;
+  }
+  changed_.notify_all();
+  if (writer_->Frames() % 100 == 0) {
+    std::printf("live view: saved %d frames\n", writer_->Frames());
+  }
+}
+
+void LiveViewer::Impl::WaitForCapture(int recorded) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  changed_.wait(lock, [&] {
+    return stop_ || !capturing_ || recorded - next_capture_ < max_ahead_;
+  });
+}
+
 void LiveViewer::Impl::UpdateTimeline() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -919,7 +1125,15 @@ void LiveViewer::Impl::Drive(std::thread& producer) {
     }
     UpdateTimeline();
     UpdateColorbar();
-    if (cursor_ >= first_ && cursor_ < end_ && cursor_ != shown_) {
+    if (Capturing()) {
+      try {
+        Capture();
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error_ = std::current_exception();
+        break;
+      }
+    } else if (cursor_ >= first_ && cursor_ < end_ && cursor_ != shown_) {
       if (Publish(cursor_)) {
         shown_ = cursor_;
       }
@@ -943,14 +1157,22 @@ void LiveViewer::Impl::Drive(std::thread& producer) {
       std::snprintf(status, sizeof(status), "%d of %d frames loaded", end_,
                     total_);
     }
+    if (Capturing()) {
+      std::snprintf(status, sizeof(status), "%s %d",
+                    mode_ == Mode::Simulation ? "step" : "frame",
+                    std::max(cursor_, 0) + (mode_ == Mode::Simulation));
+    }
     viewer_->SetText(status_id_, status);
 
     viewer_->Frame();
     ++frames;
     // Offscreen runs end once the last frame is drawn (rendering lags a few
     // frames behind the update)
-    const bool at_end = recording_done_ && shown_ == end_ - 1 &&
-                        (mode_ == Mode::Simulation || (!playing_ && !loop_));
+    const bool saving = !options_.video.empty() || !options_.png_dir.empty();
+    const bool at_end =
+        saving ? !Capturing()
+               : recording_done_ && shown_ == end_ - 1 &&
+                     (mode_ == Mode::Simulation || (!playing_ && !loop_));
     if (options_.offscreen && at_end && ++drawn_at_end > 3) {
       break;
     }
@@ -959,6 +1181,14 @@ void LiveViewer::Impl::Drive(std::thread& producer) {
   stop_ = true;
   changed_.notify_all();
   producer.join();
+  if (writer_) {
+    // Closed before saving them all; keep what was saved
+    std::printf("live view: saved %d frames before closing\n",
+                writer_->Frames());
+    capturing_ = false;
+    writer_->Close();
+    writer_.reset();
+  }
   if (error_) {
     std::rethrow_exception(error_);
   }
@@ -988,6 +1218,10 @@ void LiveViewer::Impl::Run(int n_steps, const std::function<void(int)>& step) {
           std::unique_lock<std::mutex> lock(mutex_);
           changed_.wait(lock, [&] { return !sim_paused_ || stop_; });
         }
+        if (stop_) {
+          break;
+        }
+        WaitForCapture(i);
         if (stop_) {
           break;
         }
@@ -1025,6 +1259,10 @@ void LiveViewer::Impl::Play(int n_frames, double fps, bool loop,
   std::thread producer([&] {
     try {
       for (int i = 0; i < n_frames && !stop_; ++i) {
+        WaitForCapture(i);
+        if (stop_) {
+          break;
+        }
         const auto t0 = Clock::now();
         load(i);
         Record(std::chrono::duration<double, std::milli>(Clock::now() - t0)
@@ -1043,6 +1281,9 @@ void LiveViewer::Impl::Play(int n_frames, double fps, bool loop,
 // range's start, the ruler, its end and the frame on screen, then
 // the transport and its settings
 void LiveViewer::Impl::DrawTimeline() {
+  if (options_.offscreen) {
+    return;  // Nobody to use it, and kept out of saved frames
+  }
   const float unit    = ImGui::GetFontSize();
   const float field   = 4.0f * unit;
   const float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -1425,6 +1666,20 @@ const ViewerFlag kViewerFlags[] = {
     {"screenshot", &LiveViewerOptions::screenshot,
      "write the last frame to this PNG file (implies --offscreen)"},
     {"field", &LiveViewerOptions::field, "field to color by at first"},
+    {"video", &LiveViewerOptions::video,
+     "save the frames to this H.264 video (ffmpeg)"},
+    {"png_dir", &LiveViewerOptions::png_dir,
+     "save the frames as PNG files in this folder"},
+    {"capture_every", &LiveViewerOptions::capture_every,
+     "save every Nth frame (and the last)"},
+    {"video_fps", &LiveViewerOptions::video_fps,
+     "frame rate of the saved video"},
+    {"azimuth", &LiveViewerOptions::camera_azimuth,
+     "camera direction from +x toward +y (degrees)"},
+    {"elevation", &LiveViewerOptions::camera_elevation,
+     "camera height above the xy plane (degrees)"},
+    {"distance", &LiveViewerOptions::camera_distance,
+     "camera distance in model sizes (0 frames the model)"},
 };
 
 }  // namespace

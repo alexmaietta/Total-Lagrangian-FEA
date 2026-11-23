@@ -26,6 +26,16 @@ struct LiveViewerOptions {
   bool show_viewer_ui = false;  // Menus, toolbar, HUD and panels
   std::string field;            // Shown first, or empty for the first added
   std::string screenshot;       // Last frame's PNG (implies offscreen)
+  // Saved frames: every capture_every-th and the last, the run waiting on
+  // saving rather than dropping frames
+  std::string video;  // H.264 through ffmpeg
+  std::string png_dir;
+  int capture_every = 1;
+  double video_fps  = 30.0;
+  // Camera about the model's center, in degrees and model sizes
+  double camera_azimuth   = -51.3;  // From +x toward +y
+  double camera_elevation = 19.4;
+  double camera_distance  = 0.0;  // 0 frames the model
   // Frame history, spilling to pinned host memory, then dropping the oldest
   size_t history_device_mb = 1024;
   size_t history_host_mb   = 4096;

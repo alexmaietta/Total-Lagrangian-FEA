@@ -9,9 +9,14 @@
  * thread, so the viewer stays responsive. Space pauses, the left and right
  * arrows step a frame, Home restarts and L toggles looping.
  *
- * Example:
+ * Examples:
  *   bazel run //lib_bin/live_view:test_vtk_playback -- \
  *     --frames='output/tire_newton_res0_step_*.vtu' --loop
+ *
+ *   # A movie, headless
+ *   bazel run //lib_bin/live_view:test_vtk_playback -- \
+ *     --frames='output/tire_newton_res0_step_*.vtu' --offscreen \
+ *     --video=tire.mp4 --color_max=2e6 --azimuth=-90 --elevation=10
  */
 
 #include <cuda_runtime.h>
