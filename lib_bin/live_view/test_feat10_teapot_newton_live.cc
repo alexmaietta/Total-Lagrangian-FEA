@@ -20,12 +20,12 @@
 #include <vector>
 
 #include "../../lib_src/elements/FEAT10Data.cuh"
+#include "../../lib_src/live_view/LiveViewer.h"
 #include "../../lib_src/solvers/FEAT10ConstraintManager.h"
 #include "../../lib_src/solvers/SyncedNewton.cuh"
 #include "../../lib_utils/cpu_utils.h"
 #include "../../lib_utils/quadrature_utils.h"
 #include "lib_utils/cli_utils.h"
-#include "../../lib_src/live_view/LiveViewer.h"
 
 // Material properties (using SolidMaterialProperties)
 const SolidMaterialProperties mat_teapot =
@@ -74,7 +74,6 @@ int main(int argc, char** argv) {
   const std::string mesh_prefix =
       "data/meshes/T10/teapot_scaling/teapot_res" + std::to_string(res) + ".1";
 
-  // Read mesh data
   Eigen::MatrixXd nodes;
   Eigen::MatrixXi elements;
 
@@ -96,7 +95,6 @@ int main(int argc, char** argv) {
   GPU_FEAT10_Data gpu_t10_data(n_elems, n_nodes);
   gpu_t10_data.Initialize();
 
-  // Extract coordinate vectors from nodes matrix
   Eigen::VectorXd h_x12(n_nodes), h_y12(n_nodes), h_z12(n_nodes);
   for (int i = 0; i < n_nodes; i++) {
     h_x12(i) = nodes(i, 0);
@@ -156,7 +154,6 @@ int main(int argc, char** argv) {
   Eigen::VectorXd h_f_ext_released = h_f_ext;
   h_f_ext_released.setZero();
 
-  // Setup + material
   const Eigen::VectorXd& tet5pt_x_host       = Quadrature::tet5pt_x;
   const Eigen::VectorXd& tet5pt_y_host       = Quadrature::tet5pt_y;
   const Eigen::VectorXd& tet5pt_z_host       = Quadrature::tet5pt_z;
@@ -174,7 +171,6 @@ int main(int argc, char** argv) {
   gpu_t10_data.CalcP();
   gpu_t10_data.CalcInternalForce();
 
-  // Newton solve
   SyncedNewtonParams params = {1e-4, 1e-4, 1e-4, 1e14, 5, 10, 5e-4, false};
   SyncedNewtonSolver solver(&gpu_t10_data, gpu_t10_data.get_n_constraint());
   solver.Setup();
@@ -182,13 +178,19 @@ int main(int argc, char** argv) {
   solver.AnalyzeHessianSparsity();
   solver.SetFixedSparsityPattern(true);
 
-  // The viewer shows the boundary surfaces, following the solver nodes
   LiveView::LiveViewer viewer(
       LiveView::ViewerOptions(cli, "FEAT10 teapot Newton"));
   viewer.AddSurface(
       "Teapot", nodes, elements, {0, 0, n_nodes, n_elems, "teapot"},
       gpu_t10_data.GetX12DevicePtr(), gpu_t10_data.GetY12DevicePtr(),
       gpu_t10_data.GetZ12DevicePtr());
+
+  viewer.AddField({"Displacement", "m", LiveView::Displacement()});
+  viewer.AddField({"von Mises stress", "Pa",
+                   LiveView::ElementScalar(gpu_t10_data.GetVonMisesDevicePtr()),
+                   0, 0, [&] { gpu_t10_data.ComputeVonMises(); }});
+  viewer.AddField({"Velocity", "m/s",
+                   LiveView::NodeVector(solver.GetVelocityGuessDevicePtr())});
 
   viewer.Run(cli.GetInt("steps"), [&](int step) {
     if (step == 500) {

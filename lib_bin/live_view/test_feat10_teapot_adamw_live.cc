@@ -19,12 +19,12 @@
 #include <vector>
 
 #include "../../lib_src/elements/FEAT10Data.cuh"
+#include "../../lib_src/live_view/LiveViewer.h"
 #include "../../lib_src/solvers/FEAT10ConstraintManager.h"
 #include "../../lib_src/solvers/SyncedAdamWNocoop.cuh"
 #include "../../lib_utils/cli_utils.h"
 #include "../../lib_utils/cpu_utils.h"
 #include "../../lib_utils/quadrature_utils.h"
-#include "../../lib_src/live_view/LiveViewer.h"
 
 // Material properties (using SolidMaterialProperties)
 const SolidMaterialProperties mat_teapot =
@@ -49,7 +49,6 @@ int main(int argc, char** argv) {
     return cli.HelpRequested() ? 0 : 1;
   }
 
-  // Read mesh data
   Eigen::MatrixXd nodes;
   Eigen::MatrixXi elements;
 
@@ -69,7 +68,6 @@ int main(int argc, char** argv) {
   GPU_FEAT10_Data gpu_t10_data(n_elems, n_nodes);
   gpu_t10_data.Initialize();
 
-  // Extract coordinate vectors from nodes matrix
   Eigen::VectorXd h_x12(n_nodes), h_y12(n_nodes), h_z12(n_nodes);
   for (int i = 0; i < n_nodes; i++) {
     h_x12(i) = nodes(i, 0);
@@ -127,7 +125,6 @@ int main(int argc, char** argv) {
   }
   gpu_t10_data.SetExternalForce(h_f_ext);
 
-  // Setup + material
   const Eigen::VectorXd& tet5pt_x_host       = Quadrature::tet5pt_x;
   const Eigen::VectorXd& tet5pt_y_host       = Quadrature::tet5pt_y;
   const Eigen::VectorXd& tet5pt_z_host       = Quadrature::tet5pt_z;
@@ -158,13 +155,17 @@ int main(int argc, char** argv) {
   solver.Setup();
   solver.SetParameters(&params);
 
-  // The viewer shows the boundary surfaces, following the solver nodes
   LiveView::LiveViewer viewer(
       LiveView::ViewerOptions(cli, "FEAT10 teapot AdamW"));
   viewer.AddSurface(
       "Teapot", nodes, elements, {0, 0, n_nodes, n_elems, "teapot"},
       gpu_t10_data.GetX12DevicePtr(), gpu_t10_data.GetY12DevicePtr(),
       gpu_t10_data.GetZ12DevicePtr());
+
+  viewer.AddField({"Displacement", "m", LiveView::Displacement()});
+  viewer.AddField({"von Mises stress", "Pa",
+                   LiveView::ElementScalar(gpu_t10_data.GetVonMisesDevicePtr()),
+                   0, 0, [&] { gpu_t10_data.ComputeVonMises(); }});
 
   viewer.Run(cli.GetInt("steps"), [&](int step) { solver.Solve(); });
 

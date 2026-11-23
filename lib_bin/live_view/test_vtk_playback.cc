@@ -3,12 +3,11 @@
  *
  * Plays back FEAT10 frames in Chrono Batch Render, either the .vtu files a
  * demo wrote (e.g. test_feat10_tire_newton) or the legacy .vtk files of the
- * FEniCS validation runs. Frames are colored by von Mises stress when they
- * have it, and by displacement otherwise. They are read with the small ASCII
- * VTK reader in lib_src/live_view and loaded on a worker thread, so the viewer
- * stays responsive.
- * Space pauses, the left and right arrows step a frame, Home restarts and L
- * toggles looping.
+ * FEniCS validation runs. Frames can be colored by displacement and by one
+ * field of the files, von Mises stress when they have it. They are read with
+ * the small ASCII VTK reader in lib_src/live_view and loaded on a worker
+ * thread, so the viewer stays responsive. Space pauses, the left and right
+ * arrows step a frame, Home restarts and L toggles looping.
  *
  * Example:
  *   bazel run //lib_bin/live_view:test_vtk_playback -- \
@@ -23,10 +22,10 @@
 #include <string>
 #include <vector>
 
-#include "../../lib_utils/cli_utils.h"
-#include "../../lib_utils/cuda_utils.h"
 #include "../../lib_src/live_view/LiveViewer.h"
 #include "../../lib_src/live_view/VtkReader.h"
+#include "../../lib_utils/cli_utils.h"
+#include "../../lib_utils/cuda_utils.h"
 
 int main(int argc, char** argv) {
   ANCFCPUUtils::Cli cli(argv[0]);
@@ -34,11 +33,13 @@ int main(int argc, char** argv) {
       "Play back FEAT10 .vtu or .vtk frames in Chrono Batch Render.");
   cli.AddString("frames", "", "frames to play, as a glob pattern (quote it)");
   cli.AddString("color", "auto",
-                "field to color by (von_mises_stress, displacement_magnitude, "
-                "another field, or displacement for the distance from the "
-                "rest position; auto picks von_mises_stress when present)");
+                "field of the files to color by besides displacement "
+                "(von_mises_stress, displacement_magnitude, another field, or "
+                "displacement for none; auto picks von_mises_stress when "
+                "present)");
   cli.AddDouble("color_max", 0.0,
-                "value at the top of the colormap (0 estimates it)");
+                "value at the top of the colormap for that field (0 fits the "
+                "frames loaded)");
   cli.AddDouble("fps", 30.0, "frames shown per second");
   cli.AddBool("loop", false, "start over after the last frame");
   LiveView::AddViewerOptions(cli);
@@ -94,24 +95,20 @@ int main(int argc, char** argv) {
     HANDLE_ERROR(cudaMalloc(&d_scalar, n_nodes * sizeof(double)));
   }
 
-  LiveView::LiveViewerOptions options =
-      LiveView::ViewerOptions(cli, "TL-FEA playback");
-  if (scalar == "von_mises_stress") {
-    options.color_label = "von Mises stress";
-    options.color_units = "Pa";
-  } else if (!scalar.empty()) {
-    options.color_label = scalar;
-    options.color_units = scalar == "displacement_magnitude" ? "m" : "";
-  }
-  options.color_max = float(cli.GetDouble("color_max"));
-  if (options.color_max <= 0.0f && !scalar.empty()) {
-    options.color_max = float(sequence.EstimateScalarMax());
-  }
-
-  LiveView::LiveViewer viewer(options);
+  LiveView::LiveViewer viewer(LiveView::ViewerOptions(cli, "TL-FEA playback"));
   viewer.AddSurface("Mesh", sequence.RestNodes(), sequence.Elements(),
                     {0, 0, n_nodes, sequence.NumElements(), "mesh"}, d_x, d_y,
-                    d_z, d_scalar);
+                    d_z);
+  if (!scalar.empty()) {
+    const bool vm = scalar == "von_mises_stress";
+    viewer.AddField({vm ? "von Mises stress" : scalar,
+                     vm                                   ? "Pa"
+                     : scalar == "displacement_magnitude" ? "m"
+                                                          : "",
+                     LiveView::NodeScalar(d_scalar), 0.0f,
+                     float(cli.GetDouble("color_max"))});
+  }
+  viewer.AddField({"Displacement", "m", LiveView::Displacement()});
 
   std::vector<double> xyz, values;
   viewer.Play(sequence.Size(), cli.GetDouble("fps"), cli.GetBool("loop"),

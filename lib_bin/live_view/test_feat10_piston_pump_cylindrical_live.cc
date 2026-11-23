@@ -29,13 +29,13 @@
 #include <vector>
 
 #include "../../lib_src/elements/FEAT10Data.cuh"
+#include "../../lib_src/live_view/LiveViewer.h"
 #include "../../lib_src/solvers/FEAT10ConstraintManager.h"
 #include "../../lib_src/solvers/SyncedNewton.cuh"
 #include "../../lib_utils/cli_utils.h"
 #include "../../lib_utils/cpu_utils.h"
 #include "../../lib_utils/mesh_manager.h"
 #include "../../lib_utils/quadrature_utils.h"
-#include "../../lib_src/live_view/LiveViewer.h"
 
 namespace {
 
@@ -582,7 +582,6 @@ int main(int argc, char** argv) {
   std::cout << "initial couple dir:       ["
             << initial_load_dirs.second.transpose() << "]\n";
 
-  // The viewer shows the boundary surfaces, following the solver nodes
   LiveView::LiveViewer viewer(
       LiveView::ViewerOptions(cli, "FEAT10 piston pump (cylindrical joint)"));
   viewer.AddSurface(
@@ -592,6 +591,13 @@ int main(int argc, char** argv) {
                     gpu_t10_data.GetX12DevicePtr(),
                     gpu_t10_data.GetY12DevicePtr(),
                     gpu_t10_data.GetZ12DevicePtr());
+
+  viewer.AddField({"Displacement", "m", LiveView::Displacement()});
+  viewer.AddField({"von Mises stress", "Pa",
+                   LiveView::ElementScalar(gpu_t10_data.GetVonMisesDevicePtr()),
+                   0, 0, [&] { gpu_t10_data.ComputeVonMises(); }});
+  viewer.AddField({"Velocity", "m/s",
+                   LiveView::NodeVector(solver.GetVelocityGuessDevicePtr())});
 
   viewer.Run(max_steps, [&](int i) {
     const int step          = i + 1;

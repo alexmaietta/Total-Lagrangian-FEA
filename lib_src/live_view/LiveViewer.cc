@@ -13,7 +13,10 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "../../lib_utils/cuda_utils.h"
@@ -21,6 +24,7 @@
 #include "LiveViewerKernels.cuh"
 #include "chrono_batch_render/app/viewer/viewer.h"
 #include "chrono_batch_render/chrono_batch_render.h"
+#include "chrono_batch_render/io/image.h"
 #include "imgui.h"
 
 namespace cbr = chrono::batch_render;
@@ -230,18 +234,28 @@ class FrameHistory {
 class LiveViewer::Impl {
  public:
   struct Surface {
+    std::string name;
     std::string path;
     int n_vertices         = 0;
-    int terms              = 1;        // Coefficients per vertex
-    const double* d_x12    = nullptr;  // Solver coefficients
+    int terms              = 1;
+    const double* d_x12    = nullptr;  // Solver's
     const double* d_y12    = nullptr;
     const double* d_z12    = nullptr;
-    const double* d_scalar = nullptr;  // Scalar to color by, or nullptr
     int* d_coefs           = nullptr;  // (n_vertices * terms)
     float* d_weights       = nullptr;  // (n_vertices * terms)
     float* d_rest          = nullptr;  // (n_vertices * 3)
-    size_t points_offset   = 0;        // Within a recorded frame
-    size_t values_offset   = 0;
+    int* d_element_offsets = nullptr;  // CSR, or nullptr
+    int* d_elements        = nullptr;
+    size_t points_offset   = 0;  // In a frame
+    size_t values_offset   = 0;  // Fields follow one another
+  };
+
+  struct FieldState {
+    Field field;
+    float scale = 1.0f;  // Of the colormap range
+    // Recorded so far (under mutex_)
+    float lo = FLT_MAX;
+    float hi = -FLT_MAX;
   };
 
   explicit Impl(const LiveViewerOptions& options) : options_(options) {
@@ -276,15 +290,24 @@ class LiveViewer::Impl {
       cudaFree(s.d_coefs);
       cudaFree(s.d_weights);
       cudaFree(s.d_rest);
+      cudaFree(s.d_element_offsets);
+      cudaFree(s.d_elements);
     }
     cudaFree(d_values_);
+    cudaFree(d_ranges_);
     cudaEventDestroy(publish_done_);
     cudaStreamDestroy(copy_stream_);
   }
 
   void AddSurface(const std::string& name, const LinearSurface& linear,
-                  const double* d_x12, const double* d_y12, const double* d_z12,
-                  const double* d_scalar);
+                  const double* d_x12, const double* d_y12,
+                  const double* d_z12);
+  void AddField(Field field) {
+    if (viewer_) {
+      throw std::runtime_error("LiveViewer fields must be added before Run");
+    }
+    fields_.push_back({std::move(field)});
+  }
   void Run(int n_steps, const std::function<void(int)>& step);
   void Play(int n_frames, double fps, bool loop,
             const std::function<void(int)>& load);
@@ -298,6 +321,14 @@ class LiveViewer::Impl {
 
   void Open();
   void Record(double step_ms);
+  void RecordField(const FieldSource& source, const Surface& s,
+                   const float* points, float* values);
+  std::array<float, 2> ColorRange(int field);
+  void UpdateColorbar();
+  void SelectField(int field) {
+    field_ = field;
+    shown_ = -1;  // Recolor the frame on screen
+  }
   bool Publish(int frame);
   void Drive(std::thread& producer);
   void UpdateTimeline();
@@ -348,11 +379,13 @@ class LiveViewer::Impl {
   cbr::Ref<cbr::Scene> scene_;
   std::unique_ptr<cbr::app::Viewer> viewer_;
   std::vector<Surface> surfaces_;
+  std::vector<FieldState> fields_;
   size_t frame_bytes_       = 0;
-  float* d_values_          = nullptr;  // Colorize input (largest surface)
+  float* d_values_          = nullptr;  // Colorize input
+  float* d_ranges_          = nullptr;  // [min, max] per field
   cudaStream_t copy_stream_ = nullptr;
-  cudaEvent_t publish_done_ = nullptr;  // The last publish's copies
-  // Bounding box of the surfaces at rest, for framing the camera and ground
+  cudaEvent_t publish_done_ = nullptr;
+  // Rest bounding box
   std::array<double, 3> lo_ = {std::numeric_limits<double>::max(),
                                std::numeric_limits<double>::max(),
                                std::numeric_limits<double>::max()};
@@ -366,34 +399,37 @@ class LiveViewer::Impl {
   std::mutex mutex_;
   std::condition_variable changed_;
   FrameHistory history_;
-  std::vector<float> step_ms_;  // Of every recorded frame
+  std::vector<float> step_ms_;  // Per frame
   std::atomic<bool> stop_{false};
   std::atomic<bool> sim_paused_{false};
   std::atomic<bool> recording_done_{false};
   std::exception_ptr error_;
 
   // Timeline (drawing thread)
-  Mode mode_         = Mode::Simulation;
-  int total_         = 0;  // Frames expected, or 0 when unknown
-  int first_         = 0;  // Oldest frame kept
-  int end_           = 0;  // One past the newest frame
-  int cursor_        = -1;
-  int shown_         = -1;
-  bool follow_       = true;
-  bool playing_      = false;
-  bool loop_         = false;
-  double fps_        = 30.0;
-  bool every_frame_  = false;  // Else real time, skipping frames to keep up
-  int range_start_   = 0;
-  int range_end_     = -1;    // -1 follows the timeline's end
-  float color_scale_ = 1.0f;  // Of options_.color_max
+  Mode mode_        = Mode::Simulation;
+  int total_        = 0;  // Expected, 0 if unknown
+  int first_        = 0;  // Oldest kept
+  int end_          = 0;  // Past the newest
+  int cursor_       = -1;
+  int shown_        = -1;
+  bool follow_      = true;
+  bool playing_     = false;
+  bool loop_        = false;
+  double fps_       = 30.0;
+  bool every_frame_ = false;  // Else real time
+  int range_start_  = 0;
+  int range_end_    = -1;  // -1 follows the end
+  int field_        = 0;
+  // Shown in the colorbar
+  int colorbar_field_                  = -1;
+  std::array<float, 2> colorbar_range_ = {0.0f, 0.0f};
   Clock::time_point next_advance_;
 };
 
 void LiveViewer::Impl::AddSurface(const std::string& name,
                                   const LinearSurface& linear,
                                   const double* d_x12, const double* d_y12,
-                                  const double* d_z12, const double* d_scalar) {
+                                  const double* d_z12) {
   if (viewer_) {
     throw std::runtime_error("LiveViewer surfaces must be added before Run");
   }
@@ -404,6 +440,14 @@ void LiveViewer::Impl::AddSurface(const std::string& name,
     throw std::runtime_error(
         "LiveViewer surface " + name +
         " needs terms coefficients and weights per vertex");
+  }
+  const bool has_elements = !linear.element_offsets.empty();
+  if (has_elements &&
+      (linear.element_offsets.size() != size_t(n_vertices) + 1 ||
+       linear.element_offsets.front() != 0 ||
+       size_t(linear.element_offsets.back()) != linear.elements.size())) {
+    throw std::runtime_error("LiveViewer surface " + name +
+                             " needs element offsets for every vertex");
   }
 
   std::vector<cbr::Float3> points(n_vertices);
@@ -433,16 +477,13 @@ void LiveViewer::Impl::AddSurface(const std::string& name,
       cbr::Span<const cbr::Float3>(colors.data(), colors.size()))};
 
   Surface surface;
-  surface.path          = "/" + name;
-  surface.n_vertices    = n_vertices;
-  surface.terms         = linear.terms;
-  surface.d_x12         = d_x12;
-  surface.d_y12         = d_y12;
-  surface.d_z12         = d_z12;
-  surface.d_scalar      = d_scalar;
-  surface.points_offset = frame_bytes_;
-  surface.values_offset = frame_bytes_ + size_t(n_vertices) * 3 * sizeof(float);
-  frame_bytes_          = surface.values_offset + n_vertices * sizeof(float);
+  surface.name       = name;
+  surface.path       = "/" + name;
+  surface.n_vertices = n_vertices;
+  surface.terms      = linear.terms;
+  surface.d_x12      = d_x12;
+  surface.d_y12      = d_y12;
+  surface.d_z12      = d_z12;
   scene_->Define<cbr::Mesh>(surface.path, desc);
 
   const size_t vec_bytes = size_t(n_vertices) * 3 * sizeof(float);
@@ -455,14 +496,63 @@ void LiveViewer::Impl::AddSurface(const std::string& name,
   HANDLE_ERROR(cudaMalloc(&surface.d_rest, vec_bytes));
   HANDLE_ERROR(cudaMemcpy(surface.d_rest, points.data(), vec_bytes,
                           cudaMemcpyHostToDevice));
+  if (has_elements) {
+    const size_t offsets = linear.element_offsets.size() * sizeof(int);
+    const size_t ids =
+        std::max<size_t>(linear.elements.size(), 1) * sizeof(int);
+    HANDLE_ERROR(cudaMalloc(&surface.d_element_offsets, offsets));
+    HANDLE_ERROR(cudaMemcpy(surface.d_element_offsets,
+                            linear.element_offsets.data(), offsets,
+                            cudaMemcpyHostToDevice));
+    HANDLE_ERROR(cudaMalloc(&surface.d_elements, ids));
+    HANDLE_ERROR(cudaMemcpy(surface.d_elements, linear.elements.data(),
+                            linear.elements.size() * sizeof(int),
+                            cudaMemcpyHostToDevice));
+  }
   surfaces_.push_back(surface);
 }
 
 // Ground, lights and camera framed on the surfaces, then the viewer
 void LiveViewer::Impl::Open() {
   const double size = Size();
-  if (options_.color_max <= 0.0f) {
-    options_.color_max = float(0.1 * size);
+  if (fields_.empty()) {
+    fields_.push_back({{"Displacement", "m", Displacement()}});
+  }
+  // Each surface's part of a frame: its points, then its values of every
+  // field in turn
+  frame_bytes_ = 0;
+  for (Surface& s : surfaces_) {
+    s.points_offset = frame_bytes_;
+    s.values_offset =
+        s.points_offset + size_t(s.n_vertices) * 3 * sizeof(float);
+    frame_bytes_ =
+        s.values_offset + fields_.size() * s.n_vertices * sizeof(float);
+  }
+  for (const FieldState& f : fields_) {
+    if (f.field.source.kind == FieldSource::Kind::ElementScalar) {
+      for (const Surface& s : surfaces_) {
+        if (s.d_element_offsets == nullptr) {
+          throw std::runtime_error("LiveViewer field " + f.field.name +
+                                   " is per element, but " + "surface " +
+                                   s.name + " doesn't know its elements");
+        }
+      }
+    }
+  }
+  field_ = 0;
+  if (!options_.field.empty()) {
+    const auto named = std::find_if(
+        fields_.begin(), fields_.end(),
+        [&](const FieldState& f) { return f.field.name == options_.field; });
+    if (named == fields_.end()) {
+      std::string names;
+      for (const FieldState& f : fields_) {
+        names += (names.empty() ? "" : ", ") + f.field.name;
+      }
+      throw std::runtime_error("LiveViewer has no field " + options_.field +
+                               " (fields are " + names + ")");
+    }
+    field_ = int(named - fields_.begin());
   }
   const cbr::Double3 center = {0.5 * (lo_[0] + hi_[0]), 0.5 * (lo_[1] + hi_[1]),
                                0.5 * (lo_[2] + hi_[2])};
@@ -527,7 +617,6 @@ void LiveViewer::Impl::Open() {
   desc.offscreen = options_.offscreen;
   viewer_        = std::make_unique<cbr::app::Viewer>(scene_, desc);
 
-  // The same view with the timeline strip under it
   cbr::app::ViewportDesc viewport;
   viewport.name     = kViewport;
   viewport.product  = "/Render/Live";
@@ -535,8 +624,7 @@ void LiveViewer::Impl::Open() {
   viewport.footer   = [this] { DrawTimeline(); };
   viewer_->AddViewport(std::move(viewport));
 
-  // Just the view and its timeline unless the viewer's UI is asked for. Its
-  // panels stay hidden either way, a click away in the Window menu.
+  // Panels start hidden either way, a click away in the Window menu
   for (const char* panel : {"Stage", "Properties", "Info", "Log", "Profiler",
                             "Memory", "Capture"}) {
     try {
@@ -552,11 +640,9 @@ void LiveViewer::Impl::Open() {
 
   cbr::app::ColorbarDesc colorbar;
   colorbar.colormap = cbr::Colormap::Turbo;
-  colorbar.maximum  = options_.color_max;
-  colorbar.label    = options_.color_label;
-  colorbar.units    = options_.color_units;
   colorbar_id_      = viewer_->AddColorbar(colorbar, kViewport);
-  status_id_        = viewer_->AddText("", {}, kViewport);
+  UpdateColorbar();
+  status_id_ = viewer_->AddText("", {}, kViewport);
 
   history_.Configure(frame_bytes_, options_.history_device_mb << 20,
                      options_.history_host_mb << 20);
@@ -565,6 +651,64 @@ void LiveViewer::Impl::Open() {
     largest = std::max(largest, size_t(s.n_vertices));
   }
   HANDLE_ERROR(cudaMalloc(&d_values_, largest * sizeof(float)));
+  const std::vector<float> ranges = [&] {
+    std::vector<float> r;
+    for (size_t f = 0; f < fields_.size(); ++f) {
+      r.insert(r.end(), {FLT_MAX, -FLT_MAX});
+    }
+    return r;
+  }();
+  HANDLE_ERROR(cudaMalloc(&d_ranges_, ranges.size() * sizeof(float)));
+  HANDLE_ERROR(cudaMemcpy(d_ranges_, ranges.data(),
+                          ranges.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
+}
+
+// The colormap's bottom and top for a field: its own range, or else one that
+// fits the values recorded so far, symmetric about zero for signed values
+std::array<float, 2> LiveViewer::Impl::ColorRange(int field) {
+  const FieldState& f = fields_[field];
+  float lo = f.field.min, hi = f.field.max;
+  if (hi <= lo) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      lo = f.lo;
+      hi = f.hi;
+    }
+    if (lo > hi) {
+      lo = hi = 0.0f;  // Nothing recorded yet
+    } else if (lo < 0.0f && hi > 0.0f) {
+      hi = std::max(-lo, hi);
+      lo = -hi;
+    } else {
+      lo = std::min(lo, 0.0f);
+      hi = std::max(hi, 0.0f);
+    }
+    if (hi <= lo) {
+      hi = lo + 1.0f;  // All zero
+    }
+  }
+  return {lo * f.scale, hi * f.scale};
+}
+
+// Show the field on screen and its range in the colorbar, recoloring the
+// frame on screen when either changed
+void LiveViewer::Impl::UpdateColorbar() {
+  const std::array<float, 2> range = ColorRange(field_);
+  if (field_ == colorbar_field_ && range == colorbar_range_) {
+    return;
+  }
+  const Field& f = fields_[field_].field;
+  cbr::app::ColorbarDesc colorbar;
+  colorbar.colormap = cbr::Colormap::Turbo;
+  colorbar.minimum  = range[0];
+  colorbar.maximum  = range[1];
+  colorbar.label    = f.name;
+  colorbar.units    = f.units;
+  viewer_->SetColorbar(colorbar_id_, colorbar);
+  colorbar_field_ = field_;
+  colorbar_range_ = range;
+  shown_          = -1;
 }
 
 bool LiveViewer::Impl::OnKey(const cbr::app::KeyEvent& event) {
@@ -615,18 +759,72 @@ void LiveViewer::Impl::Record(double step_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     slot = static_cast<char*>(history_.Acquire());
   }
+  for (const FieldState& f : fields_) {
+    if (f.field.update) {
+      f.field.update();
+    }
+  }
   for (const Surface& s : surfaces_) {
-    GatherLiveSurface(s.n_vertices, s.terms, s.d_coefs, s.d_weights, s.d_x12,
-                      s.d_y12, s.d_z12, s.d_rest, s.d_scalar,
-                      reinterpret_cast<float*>(slot + s.points_offset),
-                      reinterpret_cast<float*>(slot + s.values_offset),
-                      nullptr);
+    float* points = reinterpret_cast<float*>(slot + s.points_offset);
+    GatherLivePoints(s.n_vertices, s.terms, s.d_coefs, s.d_weights, s.d_x12,
+                     s.d_y12, s.d_z12, points, nullptr);
+    for (size_t f = 0; f < fields_.size(); ++f) {
+      float* values = reinterpret_cast<float*>(
+          slot + s.values_offset + f * s.n_vertices * sizeof(float));
+      RecordField(fields_[f].field.source, s, points, values);
+      WidenLiveRange(s.n_vertices, values, d_ranges_ + 2 * f, nullptr);
+    }
   }
   HANDLE_ERROR(cudaGetLastError());
   HANDLE_ERROR(cudaStreamSynchronize(nullptr));
+  std::vector<float> ranges(2 * fields_.size());
+  HANDLE_ERROR(cudaMemcpy(ranges.data(), d_ranges_,
+                          ranges.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
   std::lock_guard<std::mutex> lock(mutex_);
   history_.Commit(slot);
   step_ms_.push_back(float(step_ms));
+  for (size_t f = 0; f < fields_.size(); ++f) {
+    fields_[f].lo = ranges[2 * f];
+    fields_[f].hi = ranges[2 * f + 1];
+  }
+}
+
+// Producing thread. One field's values on one surface of a new frame.
+void LiveViewer::Impl::RecordField(const FieldSource& source, const Surface& s,
+                                   const float* points, float* values) {
+  const int component = int(source.component);
+  switch (source.kind) {
+    case FieldSource::Kind::Displacement:
+      LiveDisplacement(s.n_vertices, points, s.d_rest, component, values,
+                       nullptr);
+      break;
+    case FieldSource::Kind::NodeScalar:
+      LiveNodeScalar(s.n_vertices, s.terms, s.d_coefs, source.x, values,
+                     nullptr);
+      break;
+    case FieldSource::Kind::NodeVector:
+      LiveNodeVector(s.n_vertices, s.terms, s.d_coefs, s.d_weights, source.x,
+                     source.y, source.z, source.stride, component, values,
+                     nullptr);
+      break;
+    case FieldSource::Kind::ElementScalar:
+      LiveElementScalar(s.n_vertices, s.d_element_offsets, s.d_elements,
+                        source.x, values, nullptr);
+      break;
+    case FieldSource::Kind::Kernel: {
+      FieldContext ctx;
+      ctx.surface    = s.name;
+      ctx.n_vertices = s.n_vertices;
+      ctx.terms      = s.terms;
+      ctx.coefs      = s.d_coefs;
+      ctx.weights    = s.d_weights;
+      ctx.points     = points;
+      ctx.rest       = s.d_rest;
+      source.kernel(ctx, values, nullptr);
+      break;
+    }
+  }
 }
 
 // Drawing thread. Copy a recorded frame into the renderer's own buffers,
@@ -640,8 +838,8 @@ bool LiveViewer::Impl::Publish(int frame) {
     return false;
   }
   HANDLE_ERROR(previous);
-  const char* data = history_.Data(frame);
-  const float max  = options_.color_max * color_scale_;
+  const char* data                 = history_.Data(frame);
+  const std::array<float, 2> range = colorbar_range_;
   for (const Surface& s : surfaces_) {
     cbr::MeshView view  = scene_->Select<cbr::Mesh>(s.path);
     cbr::Mapping points = view.Points().Map(cbr::MapAccess::Write);
@@ -652,10 +850,11 @@ bool LiveViewer::Impl::Publish(int frame) {
                                  data + s.points_offset,
                                  size_t(s.n_vertices) * 3 * sizeof(float),
                                  cudaMemcpyDefault, copy_stream_));
-    HANDLE_ERROR(cudaMemcpyAsync(d_values_, data + s.values_offset,
-                                 size_t(s.n_vertices) * sizeof(float),
-                                 cudaMemcpyDefault, copy_stream_));
-    ColorizeLiveSurface(s.n_vertices, d_values_, max,
+    const size_t field_bytes = size_t(s.n_vertices) * sizeof(float);
+    HANDLE_ERROR(cudaMemcpyAsync(d_values_,
+                                 data + s.values_offset + field_ * field_bytes,
+                                 field_bytes, cudaMemcpyDefault, copy_stream_));
+    ColorizeLiveSurface(s.n_vertices, d_values_, range[0], range[1],
                         MappedFloat3(colors, s.n_vertices, "displayColor"),
                         copy_stream_);
     HANDLE_ERROR(cudaGetLastError());
@@ -682,7 +881,6 @@ void LiveViewer::Impl::UpdateTimeline() {
   if (follow_) {
     cursor_ = end_ - 1;
   } else if (playing_ && now >= next_advance_) {
-    // Within the range, over what is recorded so far
     const int low     = std::max(RangeStart(), first_);
     const int high    = std::min(RangeEnd(), end_ - 1);
     const auto period = std::chrono::duration_cast<Clock::duration>(
@@ -720,6 +918,7 @@ void LiveViewer::Impl::Drive(std::thread& producer) {
       }
     }
     UpdateTimeline();
+    UpdateColorbar();
     if (cursor_ >= first_ && cursor_ < end_ && cursor_ != shown_) {
       if (Publish(cursor_)) {
         shown_ = cursor_;
@@ -823,7 +1022,6 @@ void LiveViewer::Impl::Play(int n_frames, double fps, bool loop,
   cursor_       = 0;
   next_advance_ = Clock::now();
 
-  // Frames load as fast as they can, ahead of playback
   std::thread producer([&] {
     try {
       for (int i = 0; i < n_frames && !stop_; ++i) {
@@ -848,8 +1046,7 @@ void LiveViewer::Impl::DrawTimeline() {
   const float unit    = ImGui::GetFontSize();
   const float field   = 4.0f * unit;
   const float spacing = ImGui::GetStyle().ItemSpacing.x;
-  // An icon button: the widest icon and the frame's padding
-  float icon = 0.0f;
+  float icon          = 0.0f;
   for (const char* glyph : {kIconSkipBack, kIconStepBack, kIconPlay,
                             kIconSquare, kIconRepeat, kIconSettings}) {
     icon = std::max(icon, ImGui::CalcTextSize(glyph).x);
@@ -867,7 +1064,8 @@ void LiveViewer::Impl::DrawTimeline() {
     range_start_ = std::min(start, RangeEnd() - 1);
   }
   ImGui::SameLine();
-  const float right = 2.0f * field + 8.0f * button + 10.0f * spacing;
+  const float picker = fields_.size() > 1 ? 9.0f * unit + spacing : 0.0f;
+  const float right  = 2.0f * field + 8.0f * button + 10.0f * spacing + picker;
   DrawRuler(std::max(ImGui::GetContentRegionAvail().x - right, 4.0f * unit));
   ImGui::SameLine();
   if (const int end = frame_field("##end", RangeEnd(), "End frame"); end >= 0) {
@@ -911,7 +1109,6 @@ void LiveViewer::Impl::DrawTimeline() {
   if (transport(kIconStepForward, "##forward", "Next frame (Right)", false)) {
     StepFrames(1);
   }
-  // Last frame, lit while following new frames as they are recorded
   if (transport(kIconSkipForward, "##last",
                 follow_ ? "Last frame: following new frames (End)"
                         : "Last frame, then follow new frames (End)",
@@ -921,6 +1118,19 @@ void LiveViewer::Impl::DrawTimeline() {
   if (transport(kIconRepeat, "##loop",
                 loop_ ? "Looping: on (L)" : "Looping: off (L)", loop_)) {
     loop_ = !loop_;
+  }
+  if (fields_.size() > 1) {
+    ImGui::SetNextItemWidth(9.0f * unit);
+    if (ImGui::BeginCombo("##field", fields_[field_].field.name.c_str())) {
+      for (int f = 0; f < int(fields_.size()); ++f) {
+        if (ImGui::Selectable(fields_[f].field.name.c_str(), f == field_)) {
+          SelectField(f);
+        }
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Field the surfaces are colored by");
+    ImGui::SameLine();
   }
   if (ImGui::Button((std::string(kIconSettings) + "##settings").c_str())) {
     ImGui::OpenPopup("##timelineSettings");
@@ -959,7 +1169,6 @@ void LiveViewer::Impl::DrawRuler(float width) {
   const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_SeparatorActive);
   draw->AddRectFilled(low, high, ImGui::GetColorU32(ImGuiCol_FrameBg), round);
   if (end_ > 0 && end_ - 1 >= start && first_ <= end) {
-    // Recorded frames shaded, dropped ones dimmed
     ImVec4 recorded = accent;
     recorded.w      = 0.25f;
     draw->AddRectFilled(
@@ -1003,7 +1212,6 @@ void LiveViewer::Impl::DrawRuler(float width) {
     }
   }
 
-  // The frame on screen's line, with a notch at its top
   if (cursor_ >= start && cursor_ <= end) {
     const float x    = x_at(cursor_);
     const ImU32 line = ImGui::GetColorU32(accent);
@@ -1073,17 +1281,14 @@ void LiveViewer::Impl::DrawTimelineSettings() {
   ImGui::Separator();
   section("Color");
   ImGui::SetNextItemWidth(-FLT_MIN);
-  if (ImGui::SliderFloat("##scale", &color_scale_, 0.05f, 4.0f, "range x%.2f",
-                         ImGuiSliderFlags_Logarithmic)) {
-    cbr::app::ColorbarDesc colorbar;
-    colorbar.colormap = cbr::Colormap::Turbo;
-    colorbar.maximum  = options_.color_max * color_scale_;
-    colorbar.label    = options_.color_label;
-    colorbar.units    = options_.color_units;
-    viewer_->SetColorbar(colorbar_id_, colorbar);
-    shown_ = -1;  // Recolor the frame on screen
+  ImGui::SliderFloat("##scale", &fields_[field_].scale, 0.05f, 4.0f,
+                     "range x%.2f", ImGuiSliderFlags_Logarithmic);
+  ImGui::SetItemTooltip("Scale of the colormap's range, for this field");
+  for (int f = 0; f < int(fields_.size()); ++f) {
+    if (ImGui::MenuItem(fields_[f].field.name.c_str(), nullptr, f == field_)) {
+      SelectField(f);
+    }
   }
-  ImGui::SetItemTooltip("Scale of the colormap's range");
 
   ImGui::Separator();
   section("History");
@@ -1119,12 +1324,7 @@ void LiveViewer::Impl::SavePng(const std::string& path) {
                              " pixel bytes, expected " +
                              std::to_string(size_t(w) * h * 4));
   }
-  cbr::Image image(w, h);
-  for (size_t i = 0; i < image.pixels.size(); ++i) {
-    image.pixels[i] = {rgba[4 * i] / 255.0f, rgba[4 * i + 1] / 255.0f,
-                       rgba[4 * i + 2] / 255.0f, 1.0f};
-  }
-  cbr::WritePng(path, image);
+  cbr::WritePng(path, cbr::Pixels(rgba, h, w, 4));
 }
 
 LiveViewer::LiveViewer(const LiveViewerOptions& options)
@@ -1134,27 +1334,35 @@ LiveViewer::~LiveViewer() = default;
 
 void LiveViewer::AddSurface(const std::string& name,
                             const LinearSurface& surface, const double* d_x12,
-                            const double* d_y12, const double* d_z12,
-                            const double* d_scalar) {
-  impl_->AddSurface(name, surface, d_x12, d_y12, d_z12, d_scalar);
+                            const double* d_y12, const double* d_z12) {
+  impl_->AddSurface(name, surface, d_x12, d_y12, d_z12);
 }
 
-void LiveViewer::AddSurface(const std::string& name,
-                            const ANCFCPUUtils::SurfaceTriMesh& mesh,
-                            const double* d_x12, const double* d_y12,
-                            const double* d_z12, const double* d_scalar) {
+namespace {
+
+// One term per vertex, its node's position
+LinearSurface NodeSurface(const ANCFCPUUtils::SurfaceTriMesh& mesh,
+                          const std::string& name) {
   if (mesh.global_node_ids.size() != mesh.vertices.size()) {
     throw std::runtime_error("LiveViewer surface " + name +
                              " needs one node ID per vertex");
   }
-  // One term per vertex, its node's position
   LinearSurface linear;
   linear.terms     = 1;
   linear.coefs     = mesh.global_node_ids;
   linear.weights   = std::vector<float>(mesh.vertices.size(), 1.0f);
   linear.rest      = mesh.vertices;
   linear.triangles = mesh.triangles;
-  impl_->AddSurface(name, linear, d_x12, d_y12, d_z12, d_scalar);
+  return linear;
+}
+
+}  // namespace
+
+void LiveViewer::AddSurface(const std::string& name,
+                            const ANCFCPUUtils::SurfaceTriMesh& mesh,
+                            const double* d_x12, const double* d_y12,
+                            const double* d_z12) {
+  impl_->AddSurface(name, NodeSurface(mesh, name), d_x12, d_y12, d_z12);
 }
 
 void LiveViewer::AddSurface(const std::string& name,
@@ -1162,12 +1370,31 @@ void LiveViewer::AddSurface(const std::string& name,
                             const Eigen::MatrixXi& elements,
                             const ANCFCPUUtils::MeshInstance& instance,
                             const double* d_x12, const double* d_y12,
-                            const double* d_z12, const double* d_scalar) {
-  const ANCFCPUUtils::SurfaceTriMesh surface =
+                            const double* d_z12) {
+  const ANCFCPUUtils::SurfaceTriMesh mesh =
       ANCFCPUUtils::ExtractSurfaceTriMesh(nodes, elements, instance);
   std::printf("%s surface: %zu vertices, %zu triangles\n", name.c_str(),
-              surface.vertices.size(), surface.triangles.size());
-  AddSurface(name, surface, d_x12, d_y12, d_z12, d_scalar);
+              mesh.vertices.size(), mesh.triangles.size());
+  LinearSurface linear = NodeSurface(mesh, name);
+
+  std::vector<std::vector<int>> node_elements(nodes.rows());
+  for (int e = instance.element_offset;
+       e < instance.element_offset + instance.num_elements; ++e) {
+    for (int j = 0; j < elements.cols(); ++j) {
+      node_elements.at(elements(e, j)).push_back(e);
+    }
+  }
+  linear.element_offsets.push_back(0);
+  for (const int node : mesh.global_node_ids) {
+    const std::vector<int>& in = node_elements.at(node);
+    linear.elements.insert(linear.elements.end(), in.begin(), in.end());
+    linear.element_offsets.push_back(int(linear.elements.size()));
+  }
+  impl_->AddSurface(name, linear, d_x12, d_y12, d_z12);
+}
+
+void LiveViewer::AddField(Field field) {
+  impl_->AddField(std::move(field));
 }
 
 void LiveViewer::Run(int n_steps, const std::function<void(int)>& step) {
@@ -1179,25 +1406,123 @@ void LiveViewer::Play(int n_frames, double fps, bool loop,
   impl_->Play(n_frames, fps, loop, load);
 }
 
+namespace {
+
+// A command line option and the LiveViewerOptions member it sets
+struct ViewerFlag {
+  const char* name;
+  std::variant<bool LiveViewerOptions::*, int LiveViewerOptions::*,
+               double LiveViewerOptions::*, std::string LiveViewerOptions::*>
+      member;
+  const char* help;
+};
+
+const ViewerFlag kViewerFlags[] = {
+    {"offscreen", &LiveViewerOptions::offscreen, "render without a window"},
+    {"ground", &LiveViewerOptions::show_ground, "show the ground plane"},
+    {"viewer_ui", &LiveViewerOptions::show_viewer_ui,
+     "show the viewer's menus, toolbar, HUD, axes and panels"},
+    {"screenshot", &LiveViewerOptions::screenshot,
+     "write the last frame to this PNG file (implies --offscreen)"},
+    {"field", &LiveViewerOptions::field, "field to color by at first"},
+};
+
+}  // namespace
+
 void AddViewerOptions(ANCFCPUUtils::Cli& cli, bool show_ground) {
-  cli.AddBool("offscreen", false, "render without a window");
-  cli.AddBool("ground", show_ground,
-              "show the ground plane (--ground=false hides it)");
-  cli.AddBool("viewer_ui", false,
-              "show the viewer's menus, toolbar, HUD, axes and panels");
-  cli.AddString("screenshot", "",
-                "write the last frame to this PNG file (implies --offscreen)");
+  LiveViewerOptions defaults;
+  defaults.show_ground = show_ground;
+  for (const ViewerFlag& flag : kViewerFlags) {
+    std::visit(
+        [&](auto member) {
+          const auto& value = defaults.*member;
+          using T           = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, bool>) {
+            cli.AddBool(flag.name, value, flag.help);
+          } else if constexpr (std::is_same_v<T, int>) {
+            cli.AddInt(flag.name, value, flag.help);
+          } else if constexpr (std::is_same_v<T, double>) {
+            cli.AddDouble(flag.name, value, flag.help);
+          } else {
+            cli.AddString(flag.name, value, flag.help);
+          }
+        },
+        flag.member);
+  }
 }
 
 LiveViewerOptions ViewerOptions(const ANCFCPUUtils::Cli& cli,
                                 const std::string& title) {
   LiveViewerOptions options;
-  options.title       = title;
-  options.screenshot  = cli.GetString("screenshot");
-  options.offscreen   = cli.GetBool("offscreen") || !options.screenshot.empty();
-  options.show_ground = cli.GetBool("ground");
-  options.show_viewer_ui = cli.GetBool("viewer_ui");
+  options.title = title;
+  for (const ViewerFlag& flag : kViewerFlags) {
+    std::visit(
+        [&](auto member) {
+          auto& value = options.*member;
+          using T     = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, bool>) {
+            value = cli.GetBool(flag.name);
+          } else if constexpr (std::is_same_v<T, int>) {
+            value = cli.GetInt(flag.name);
+          } else if constexpr (std::is_same_v<T, double>) {
+            value = cli.GetDouble(flag.name);
+          } else {
+            value = cli.GetString(flag.name);
+          }
+        },
+        flag.member);
+  }
   return options;
+}
+
+FieldSource Displacement(Component component) {
+  FieldSource source;
+  source.kind      = FieldSource::Kind::Displacement;
+  source.component = component;
+  return source;
+}
+
+FieldSource NodeScalar(const double* d_values) {
+  FieldSource source;
+  source.kind = FieldSource::Kind::NodeScalar;
+  source.x    = d_values;
+  return source;
+}
+
+FieldSource NodeVector(const double* d_xyz, Component component) {
+  FieldSource source;
+  source.kind      = FieldSource::Kind::NodeVector;
+  source.component = component;
+  source.x         = d_xyz;
+  source.y         = d_xyz + 1;
+  source.z         = d_xyz + 2;
+  source.stride    = 3;
+  return source;
+}
+
+FieldSource NodeVector(const double* d_x, const double* d_y, const double* d_z,
+                       Component component) {
+  FieldSource source;
+  source.kind      = FieldSource::Kind::NodeVector;
+  source.component = component;
+  source.x         = d_x;
+  source.y         = d_y;
+  source.z         = d_z;
+  return source;
+}
+
+FieldSource ElementScalar(const double* d_values) {
+  FieldSource source;
+  source.kind = FieldSource::Kind::ElementScalar;
+  source.x    = d_values;
+  return source;
+}
+
+FieldSource Kernel(FieldKernel kernel) {
+  FieldSource source;
+  source.kind   = FieldSource::Kind::Kernel;
+  source.kernel = std::move(kernel);
+  return source;
 }
 
 }  // namespace LiveView

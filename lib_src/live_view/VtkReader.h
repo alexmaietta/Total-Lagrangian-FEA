@@ -113,12 +113,6 @@ class VtkSequence {
    */
   void Frame(int frame, std::vector<double>& xyz, std::vector<double>& scalar);
 
-  /**
-   * Largest node scalar over a few frames spread through the sequence, for
-   * the color range.
-   */
-  double EstimateScalarMax(int samples = 8);
-
  private:
   struct Cached {
     std::vector<float> xyz;

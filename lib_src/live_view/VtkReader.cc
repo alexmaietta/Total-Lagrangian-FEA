@@ -485,7 +485,6 @@ void VtkSequence::Parse(int frame, Cached& cached) const {
       cached.scalar[i] = float(point->values[size_t(i) * point->components]);
     }
   } else if (const VtkArray* cell = piece.CellArray(scalar_)) {
-    // Average the element values onto their nodes
     for (Eigen::Index c = 0; c < elements_.rows(); ++c) {
       const float v = float(cell->values[size_t(c) * cell->components]);
       for (int j = 0; j < 10; ++j) {
@@ -512,23 +511,6 @@ void VtkSequence::Frame(int frame, std::vector<double>& xyz,
   }
   xyz.assign(cached->xyz.begin(), cached->xyz.end());
   scalar.assign(cached->scalar.begin(), cached->scalar.end());
-}
-
-double VtkSequence::EstimateScalarMax(int samples) {
-  if (scalar_.empty()) {
-    return 0.0;
-  }
-  double max = 0.0;
-  std::vector<double> xyz, scalar;
-  const int n = std::min(samples, Size());
-  for (int s = 0; s < n; ++s) {
-    const int frame = n == 1 ? 0 : int((long(Size() - 1) * s) / (n - 1));
-    Frame(frame, xyz, scalar);
-    for (double v : scalar) {
-      max = std::max(max, v);
-    }
-  }
-  return max;
 }
 
 }  // namespace LiveView

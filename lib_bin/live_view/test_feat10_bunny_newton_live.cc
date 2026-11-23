@@ -23,12 +23,12 @@
 #include <vector>
 
 #include "../../lib_src/elements/FEAT10Data.cuh"
+#include "../../lib_src/live_view/LiveViewer.h"
 #include "../../lib_src/solvers/FEAT10ConstraintManager.h"
 #include "../../lib_src/solvers/SyncedNewton.cuh"
 #include "../../lib_utils/cli_utils.h"
 #include "../../lib_utils/cpu_utils.h"
 #include "../../lib_utils/quadrature_utils.h"
-#include "../../lib_src/live_view/LiveViewer.h"
 
 int main(int argc, char** argv) {
   ANCFCPUUtils::Cli cli(argv[0]);
@@ -68,7 +68,6 @@ int main(int argc, char** argv) {
   std::printf("mesh %s: %d nodes, %d elements\n", mesh_prefix.c_str(), n_nodes,
               n_elems);
 
-  // Solver setup, as in test_feat10_bunny_newton
   GPU_FEAT10_Data data(n_elems, n_nodes);
   data.Initialize();
 
@@ -114,14 +113,18 @@ int main(int argc, char** argv) {
   solver.AnalyzeHessianSparsity();
   solver.SetFixedSparsityPattern(true);
 
-  // The viewer shows the bunny's boundary surface, following the solver nodes
-  LiveView::LiveViewerOptions options =
-      LiveView::ViewerOptions(cli, "TL-FEA bunny (Newton)");
-  options.color_max = 0.3f;
-  LiveView::LiveViewer viewer(options);
+  LiveView::LiveViewer viewer(
+      LiveView::ViewerOptions(cli, "TL-FEA bunny (Newton)"));
   viewer.AddSurface("Bunny", nodes, elements, {0, 0, n_nodes, n_elems, "bunny"},
                     data.GetX12DevicePtr(), data.GetY12DevicePtr(),
                     data.GetZ12DevicePtr());
+
+  viewer.AddField({"Displacement", "m", LiveView::Displacement(), 0, 0.3f});
+  viewer.AddField({"von Mises stress", "Pa",
+                   LiveView::ElementScalar(data.GetVonMisesDevicePtr()), 0, 0,
+                   [&] { data.ComputeVonMises(); }});
+  viewer.AddField({"Velocity", "m/s",
+                   LiveView::NodeVector(solver.GetVelocityGuessDevicePtr())});
 
   viewer.Run(steps, [&](int step) {
     if (step == load_steps) {
