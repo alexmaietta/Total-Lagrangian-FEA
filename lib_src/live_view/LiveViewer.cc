@@ -324,8 +324,8 @@ class LiveViewer::Impl {
     follow_  = true;
     playing_ = false;
   }
-  // The range the ruler shows and playback stays in (ernie's start and end
-  // time codes), the whole timeline unless edited
+  // The range the ruler shows and playback stays in (the start and end time
+  // codes), the whole timeline unless edited
   int RangeStart() const {
     return std::max(range_start_, 0);
   }
@@ -841,8 +841,8 @@ void LiveViewer::Impl::Play(int n_frames, double fps, bool loop,
   Drive(producer);
 }
 
-// The timeline strip under the view, laid out as ernie's timeline panel (and
-// Kit's): the range's start, the ruler, its end and the frame on screen, then
+// The timeline strip under the view, laid out like Kit's timeline panel: the
+// range's start, the ruler, its end and the frame on screen, then
 // the transport and its settings
 void LiveViewer::Impl::DrawTimeline() {
   const float unit    = ImGui::GetFontSize();
@@ -1017,7 +1017,7 @@ void LiveViewer::Impl::DrawRuler(float width) {
   }
 }
 
-// ernie's frame rate and playback settings, then the live view's own
+// The frame rate and playback settings, then the live view's own
 void LiveViewer::Impl::DrawTimelineSettings() {
   const auto section = [](const char* title) {
     ImGui::TextDisabled("%s", title);
