@@ -1108,6 +1108,7 @@ struct GPU_ANCF3243_Data : public ElementBase {
   const double* GetZ12DevicePtr() const { return d_z12; }
   double* GetExternalForceDevicePtr() { return d_f_ext; }
   const double* GetExternalForceDevicePtr() const { return d_f_ext; }
+  const double* GetVonMisesDevicePtr() const { return d_vm_stress; }
 
   void RetrieveConstraintJacobianCSRToCPU(std::vector<int> &offsets,
                                           std::vector<int> &columns,

@@ -1189,6 +1189,7 @@ struct GPU_FEAT10_Data : public ElementBase {
   const double* GetZ12JacDevicePtr() const { return d_h_z12_jac; }
   double* GetExternalForceDevicePtr() { return d_f_ext; }
   const double* GetExternalForceDevicePtr() const { return d_f_ext; }
+  const double* GetVonMisesDevicePtr() const { return d_vm_stress; }
 
   /**
    * Update node positions on GPU (for prescribed motion of fixed nodes).
