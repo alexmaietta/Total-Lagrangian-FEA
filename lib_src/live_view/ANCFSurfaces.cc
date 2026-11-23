@@ -29,26 +29,44 @@ Eigen::VectorXd Basis3443(double u, double v, double w) {
 
 /**
  * Adds vertices of one element at element coordinates, as weighted sums of
- * its coefficients (s = B_inv b, as in the element kernels).
+ * its coefficients (s = B_inv b, as in the element kernels). Vertices at the
+ * same rest position are one vertex, so faces sharing an edge (within an
+ * element or across elements, where ANCF positions agree) form one connected
+ * surface, and a vertex lies in every element that added it.
  */
 class ElementSampler {
  public:
+  // Vertices closer than tolerance at rest are welded
   ElementSampler(LinearSurface& out, const Eigen::VectorXd& x12,
                  const Eigen::VectorXd& y12, const Eigen::VectorXd& z12,
                  const Eigen::MatrixXd& B_inv,
-                 Eigen::VectorXd (*basis)(double, double, double))
+                 Eigen::VectorXd (*basis)(double, double, double),
+                 double tolerance)
       : out_(out),
         x12_(x12),
         y12_(y12),
         z12_(z12),
         B_inv_(B_inv),
-        basis_(basis) {}
+        basis_(basis),
+        tolerance_(tolerance) {}
 
   // Coefficient i of the element is dof i % 4 of its node i / 4
   void SetElement(const Eigen::MatrixXi& connectivity, int element) {
+    element_ = element;
     coefs_.resize(B_inv_.rows());
     for (int i = 0; i < int(coefs_.size()); ++i) {
       coefs_[i] = connectivity(element, i / 4) * 4 + i % 4;
+    }
+    center_ = Position(0, 0, 0);
+  }
+
+  // Write the elements each vertex lies in to the surface
+  void Finish() {
+    out_.element_offsets.assign(1, 0);
+    out_.elements.clear();
+    for (const std::vector<int>& in : vertex_elements_) {
+      out_.elements.insert(out_.elements.end(), in.begin(), in.end());
+      out_.element_offsets.push_back(int(out_.elements.size()));
     }
   }
 
@@ -63,17 +81,37 @@ class ElementSampler {
   }
 
   int Add(double u, double v, double w) {
-    const Eigen::VectorXd s = B_inv_ * basis_(u, v, w);
-    for (int i = 0; i < int(coefs_.size()); ++i) {
-      out_.coefs.push_back(coefs_[i]);
-      out_.weights.push_back(float(s(i)));
+    const Eigen::Vector3d p            = Position(u, v, w);
+    const std::array<long long, 3> key = {std::llround(p.x() / tolerance_),
+                                          std::llround(p.y() / tolerance_),
+                                          std::llround(p.z() / tolerance_)};
+    const auto [it, added] = welded_.try_emplace(key, int(out_.rest.size()));
+    if (added) {
+      const Eigen::VectorXd s = B_inv_ * basis_(u, v, w);
+      for (int i = 0; i < int(coefs_.size()); ++i) {
+        out_.coefs.push_back(coefs_[i]);
+        out_.weights.push_back(float(s(i)));
+      }
+      out_.rest.push_back(p);
+      vertex_elements_.emplace_back();
     }
-    out_.rest.push_back(Position(u, v, w));
-    return int(out_.rest.size()) - 1;
+    std::vector<int>& in = vertex_elements_[it->second];
+    if (std::find(in.begin(), in.end(), element_) == in.end()) {
+      in.push_back(element_);
+    }
+    return it->second;
   }
 
-  // Two triangles over a quad given in order around it
+  // Two triangles over a quad given in order around it, facing away from the
+  // element's center (the renderer culls faces seen from behind)
   void Quad(int a, int b, int c, int d) {
+    const auto& r = out_.rest;
+    const Eigen::Vector3d n =
+        (r[b] - r[a]).cross(r[c] - r[a]) + (r[c] - r[a]).cross(r[d] - r[a]);
+    const Eigen::Vector3d m = 0.25 * (r[a] + r[b] + r[c] + r[d]);
+    if (n.dot(m - center_) < 0.0) {
+      std::swap(b, d);
+    }
     out_.triangles.emplace_back(a, b, c);
     out_.triangles.emplace_back(a, c, d);
   }
@@ -112,7 +150,12 @@ class ElementSampler {
   const Eigen::VectorXd& z12_;
   const Eigen::MatrixXd& B_inv_;
   Eigen::VectorXd (*basis_)(double, double, double);
+  double tolerance_;
   std::vector<int> coefs_;
+  int element_            = 0;
+  Eigen::Vector3d center_ = Eigen::Vector3d::Zero();
+  std::map<std::array<long long, 3>, int> welded_;
+  std::vector<std::vector<int>> vertex_elements_;
 };
 
 // Element node nearest a point, among the element's nodes
@@ -144,7 +187,8 @@ LinearSurface ANCF3243Surface(const Eigen::VectorXd& x12,
   out.terms = 8;
   Eigen::MatrixXd B_inv;
   ANCFCPUUtils::ANCF3243_B12_matrix(L, W, H, B_inv, 8);
-  ElementSampler sampler(out, x12, y12, z12, B_inv, Basis3243);
+  ElementSampler sampler(out, x12, y12, z12, B_inv, Basis3243,
+                         1e-6 * std::min({L, W, H}));
 
   std::map<int, int> uses;  // Elements at each node
   for (int e = 0; e < connectivity.rows(); ++e) {
@@ -153,7 +197,6 @@ LinearSurface ANCF3243Surface(const Eigen::VectorXd& x12,
     }
   }
 
-  // Cross-section corners, in order around it
   const double v = 0.5 * W, w = 0.5 * H;
   const std::array<std::pair<double, double>, 4> section = {
       {{-v, -w}, {v, -w}, {v, w}, {-v, w}}};
@@ -189,6 +232,7 @@ LinearSurface ANCF3243Surface(const Eigen::VectorXd& x12,
         "functions may not match the element's\n",
         worst);
   }
+  sampler.Finish();
   return out;
 }
 
@@ -201,10 +245,10 @@ LinearSurface ANCF3443Surface(const Eigen::VectorXd& x12,
   out.terms = 16;
   Eigen::MatrixXd B_inv;
   ANCFCPUUtils::ANCF3443_B12_matrix(L, W, H, B_inv, 16);
-  ElementSampler sampler(out, x12, y12, z12, B_inv, Basis3443);
+  ElementSampler sampler(out, x12, y12, z12, B_inv, Basis3443,
+                         1e-6 * std::min({L, W, H}));
 
   const double u = 0.5 * L, v = 0.5 * W, w = 0.5 * H;
-  // Element corners in order around it, and the nodes there
   const std::array<std::pair<double, double>, 4> corners = {
       {{-u, -v}, {u, -v}, {u, v}, {-u, v}}};
   std::vector<std::array<int, 4>> corner_nodes(connectivity.rows());
@@ -252,6 +296,7 @@ LinearSurface ANCF3443Surface(const Eigen::VectorXd& x12,
         "functions may not match the element's\n",
         worst);
   }
+  sampler.Finish();
   return out;
 }
 

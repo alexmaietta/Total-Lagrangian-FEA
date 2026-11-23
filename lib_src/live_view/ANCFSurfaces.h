@@ -9,6 +9,8 @@
 // element coordinates is a fixed weighted sum of coefficients. These builders
 // sample the faces of each element and keep the shape function values as
 // weights, so the surfaces follow the elements exactly, bending included.
+// Faces face outward, and vertices where faces or elements meet are shared,
+// lying in each of those elements (for element fields).
 
 namespace LiveView {
 
@@ -22,7 +24,9 @@ namespace LiveView {
  * @param connectivity Node IDs of each element (n_elements x 2)
  * @param L Element length
  * @param W Cross-section width
- * @param H Cross-section height
+ * @param H Cross-section height. W and H can be larger than the element's to
+ * draw a thin beam thicker; positions are linear across the section, so the
+ * larger section follows the element exactly.
  * @param segments Samples along each element's length
  */
 LinearSurface ANCF3243Surface(const Eigen::VectorXd& x12,
