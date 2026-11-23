@@ -212,8 +212,8 @@ cc_binary(
 )
 
 cc_binary(
-    name = "test_ancf3243_live",
-    srcs = ["test_ancf3243_live.cc"],
+    name = "test_ancf3243_vbd_live",
+    srcs = ["test_ancf3243_vbd_live.cc"],
     copts = ["--std=c++17"],
     linkopts = [
         "-L/usr/local/cuda/lib64",
@@ -226,10 +226,8 @@ cc_binary(
         "//lib_src/elements:ANCF3243Data",
         "//lib_src/live_view:ancf_surfaces",
         "//lib_src/live_view:live_viewer",
-        "//lib_src/solvers:solvers_syncedadamwnocoop",
-        "//lib_src/solvers:solvers_syncednesterov",
-        "//lib_src/solvers:solvers_syncednewton",
         "//lib_src/solvers:solvers_syncedvbd",
+        "//lib_utils:cli_utils",
         "//lib_utils:cpu_utils",
         "//lib_utils:mesh_utils",
         "//lib_utils:visualization_utils",
@@ -238,8 +236,8 @@ cc_binary(
 )
 
 cc_binary(
-    name = "test_ancf3443_live",
-    srcs = ["test_ancf3443_live.cc"],
+    name = "test_ancf3443_vbd_live",
+    srcs = ["test_ancf3443_vbd_live.cc"],
     copts = ["--std=c++17"],
     linkopts = [
         "-L/usr/local/cuda/lib64",
@@ -252,10 +250,8 @@ cc_binary(
         "//lib_src/elements:ANCF3443Data",
         "//lib_src/live_view:ancf_surfaces",
         "//lib_src/live_view:live_viewer",
-        "//lib_src/solvers:solvers_syncedadamwnocoop",
-        "//lib_src/solvers:solvers_syncednesterov",
-        "//lib_src/solvers:solvers_syncednewton",
         "//lib_src/solvers:solvers_syncedvbd",
+        "//lib_utils:cli_utils",
         "//lib_utils:cpu_utils",
         "//lib_utils:visualization_utils",
         "@eigen//:eigen",
